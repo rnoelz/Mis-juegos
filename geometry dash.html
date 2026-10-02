@@ -1,0 +1,2094 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Geo Dash</title>
+  <link href="https://fonts.googleapis.com/css2?family=Russo+One&display=swap" rel="stylesheet">
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      background: #000;
+      user-select: none;
+      -webkit-user-select: none;
+      touch-action: none;
+    }
+    canvas {
+      display: block;
+      position: fixed;
+      top: 0;
+      left: 0;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="juego"></canvas>
+
+  <script>
+    // =====================================================================
+    //  GEO DASH  -  inspirado en Geometry Dash
+    //  Un cuadrito que avanza solo al ritmo de la música. Tú solo saltas.
+    //  7 modos: cubo, nave, bola, ovni, onda, robot y araña.
+    // =====================================================================
+
+    // 1. LA PANTALLA (se dibuja por dentro a 1800p)
+    const canvas = document.getElementById("juego");
+    const ctx = canvas.getContext("2d");
+    const ALTO_RESOLUCION = 1800;
+    let RES = 1, PW = 0, PH = 0;
+    function ajustarPantalla() {
+      PW = window.innerWidth;
+      PH = window.innerHeight;
+      RES = Math.max(ALTO_RESOLUCION / PH, window.devicePixelRatio || 1);
+      canvas.width = Math.round(PW * RES);
+      canvas.height = Math.round(PH * RES);
+      canvas.style.width = PW + "px";
+      canvas.style.height = PH + "px";
+    }
+    window.addEventListener("resize", ajustarPantalla);
+    const FUENTE = "'Russo One', Arial Black, sans-serif";
+
+    // 2. LA FÍSICA (medidas en bloques; 1 bloque = 1 cuadro del nivel)
+    const VELOCIDADES = { lenta: 8.4, normal: 10.4, rapida: 12.96, muyRapida: 15.6, extrema: 19.27 };
+    const GRAVEDAD = 95;     // bloques por segundo²
+    const SALTO = 20.2;      // el cubo sube unos 2 bloques y cruza 3 pinchos de un salto
+    const IMPULSO = { cubo: 20.2, nave: 11, bola: 13, ovni: 11.5, onda: 0, robot: 18, arana: 20.2 };
+    const TOCA_TECHO = { cubo: false, robot: false, nave: true, bola: true, ovni: true, onda: true, arana: true };
+    const TOLERANCIA = 0.14;
+    const SUBPASOS = 4, DT = 1 / 60 / SUBPASOS;
+
+    function nuevoJugador() {
+      return { x: 0, y: 0, vy: 0, grav: 1, modo: "cubo", vel: VELOCIDADES.normal, mini: false, techo: null,
+               suelo: true, sosteniaAntes: false, buffer: 0, impulsoRobot: 0, ultOrbe: -1, ultPad: -1,
+               muerto: false, gano: false, saltos: 0, monedas: 0 };
+    }
+    function clonar(j) { return Object.assign({}, j); }
+    function tamaño(j) {
+      if (j.modo === "onda") return j.mini ? 0.3 : 0.5;
+      return j.mini ? 0.6 : 1;
+    }
+
+    // Un cuadro de juego (1/60 de segundo) dividido en 4 pasitos para que los choques sean exactos
+    function pasoFisica(j, L, sostiene) {
+      let presiono = sostiene && !j.sosteniaAntes;
+      j.sosteniaAntes = sostiene;
+      if (presiono) j.buffer = 7;
+      else if (j.buffer > 0) j.buffer--;
+      for (let s = 0; s < SUBPASOS; s++) {
+        subpaso(j, L, sostiene);
+        if (j.muerto || j.gano) return;
+      }
+    }
+
+    function cosasCerca(cols, j, t) {
+      let lista = [];
+      for (let c = Math.floor(j.x) - 1; c <= Math.floor(j.x + t) + 1; c++) {
+        let col = cols[c];
+        if (col) for (let o of col) lista.push(o);
+      }
+      return lista;
+    }
+
+    function subpaso(j, L, sostiene) {
+      let t = tamaño(j), g = j.grav;
+      let cx = j.x + t / 2, cy = j.y + t / 2;
+      let cosas = cosasCerca(L.cosas, j, t);
+
+      // a) Orbes: se activan si presionas mientras los tocas
+      if (j.buffer > 0 && j.modo !== "onda") {
+        for (let o of cosas) {
+          if (o.tipo !== "orbe" || o.id <= j.ultOrbe) continue;
+          if (Math.hypot(cx - o.x, cy - o.y) < t / 2 + 0.55) {
+            activarOrbe(j, o);
+            j.ultOrbe = o.id;
+            j.buffer = 0;
+            break;
+          }
+        }
+      }
+      g = j.grav;
+
+      // b) Lo que hace cada modo al presionar
+      let base = IMPULSO[j.modo] * (j.mini ? 0.82 : 1);
+      switch (j.modo) {
+        case "cubo":
+          if (sostiene && j.suelo) { j.vy = base * g; j.suelo = false; j.saltos++; j.buffer = 0; }
+          break;
+        case "robot":
+          if (sostiene && j.suelo) { j.vy = 12 * g; j.suelo = false; j.impulsoRobot = 0.28; j.saltos++; j.buffer = 0; }
+          if (!sostiene) j.impulsoRobot = 0;
+          if (j.impulsoRobot > 0) { j.impulsoRobot -= DT; j.vy += 90 * g * DT; }
+          break;
+        case "bola":
+          if (j.buffer > 0 && j.suelo) { j.grav = -g; j.vy = -j.grav * 3; j.suelo = false; j.buffer = 0; j.saltos++; }
+          break;
+        case "arana":
+          if (j.buffer > 0 && j.suelo) { teletransportar(j, L); j.buffer = 0; j.saltos++; }
+          break;
+        case "ovni":
+          if (j.buffer === 7) { j.vy = base * g; j.buffer = 0; j.saltos++; }
+          break;
+        case "nave":
+          j.vy += (sostiene ? 52 : -44) * g * DT;
+          let sube = Math.max(-10, Math.min(9, j.vy * g));
+          j.vy = sube * g;
+          break;
+        case "onda":
+          j.vy = (sostiene ? 1 : -1) * g * j.vel * (j.mini ? 2 : 1);
+          break;
+      }
+      g = j.grav;
+
+      // c) Gravedad
+      if (j.modo === "cubo" || j.modo === "robot" || j.modo === "arana") caer(j, GRAVEDAD, 26);
+      else if (j.modo === "bola") caer(j, 70, 20);
+      else if (j.modo === "ovni") caer(j, 50, 13);
+
+      // d) Moverse
+      let antesY = j.y;
+      j.x += j.vel * DT;
+      j.y += j.vy * DT;
+      j.suelo = false;
+
+      // e) Choques: piso de abajo, techo (en modos que vuelan) y bloques
+      resolver(j, j.x - 1, -100, j.x + 2, 0, antesY);
+      if (j.techo !== null) resolver(j, j.x - 1, j.techo, j.x + 2, j.techo + 100, antesY);
+      for (let o of cosas) {
+        if (o.tipo === "bloque") resolver(j, o.x, o.y, o.x1, o.y1, antesY);
+        if (j.muerto) return;
+      }
+      t = tamaño(j);
+
+      // f) Pinchos y sierras
+      for (let o of cosas) {
+        if (o.tipo === "pincho") {
+          if (j.x + t > o.hx0 && j.x < o.hx1 && j.y + t > o.hy0 && j.y < o.hy1) { j.muerto = true; return; }
+        } else if (o.tipo === "sierra") {
+          let px = Math.max(j.x, Math.min(o.x, j.x + t)), py = Math.max(j.y, Math.min(o.y, j.y + t));
+          if (Math.hypot(px - o.x, py - o.y) < o.r * 0.8) { j.muerto = true; return; }
+        }
+      }
+
+      // g) Pads, portales y monedas
+      cx = j.x + t / 2;
+      cy = j.y + t / 2;
+      for (let o of cosas) {
+        if (o.tipo === "pad") {
+          if (o.id > j.ultPad && j.x + t > o.x && j.x < o.x + 1 && j.y + t > o.hy0 && j.y < o.hy1) {
+            activarPad(j, o);
+            j.ultPad = o.id;
+          }
+        } else if (o.tipo === "portal") {
+          if (cx - j.vel * DT < o.x && cx >= o.x) activarPortal(j, o);
+        } else if (o.tipo === "moneda") {
+          if (!(j.monedas & (1 << o.id)) && Math.hypot(cx - o.x, cy - o.y) < t / 2 + 0.45) j.monedas |= 1 << o.id;
+        }
+      }
+
+      if (j.y < -4 || j.y > 24) j.muerto = true;
+      if (j.x >= L.largo) j.gano = true;
+    }
+
+    function caer(j, gravedad, maxima) {
+      j.vy -= gravedad * j.grav * DT;
+      let cayendo = -j.vy * j.grav;
+      if (cayendo > maxima) j.vy = -maxima * j.grav;
+    }
+
+    // Choque con un bloque: si vienes de arriba aterrizas, si chocas de frente te mueres
+    function resolver(j, bx0, by0, bx1, by1, antesY) {
+      let t = tamaño(j);
+      if (j.x + t <= bx0 || j.x >= bx1 || j.y + t <= by0 || j.y >= by1) return;
+      let g = j.grav;
+      let piso = g === 1 ? (j.vy <= 0 && antesY >= by1 - TOLERANCIA) : (j.vy >= 0 && antesY + t <= by0 + TOLERANCIA);
+      if (piso) {
+        j.y = g === 1 ? by1 : by0 - t;
+        j.vy = 0;
+        j.suelo = true;
+        return;
+      }
+      let techo = g === 1 ? (j.vy >= 0 && antesY + t <= by0 + TOLERANCIA) : (j.vy <= 0 && antesY >= by1 - TOLERANCIA);
+      if (techo && TOCA_TECHO[j.modo]) {
+        j.y = g === 1 ? by0 - t : by1;
+        j.vy = 0;
+        return;
+      }
+      j.muerto = true;
+    }
+
+    function activarOrbe(j, o) {
+      let base = IMPULSO[j.modo] * (j.mini ? 0.82 : 1);
+      switch (o.color) {
+        case "amarillo": j.vy = base * j.grav; break;
+        case "rosa": j.vy = base * 0.72 * j.grav; break;
+        case "rojo": j.vy = base * 1.38 * j.grav; break;
+        case "azul": j.grav = -j.grav; j.vy = -j.grav * 8; break;
+        case "verde": j.grav = -j.grav; j.vy = base * j.grav; break;
+        case "negro": j.vy = -j.grav * base * 1.5; break;
+      }
+      j.suelo = false;
+      j.impulsoRobot = 0;
+    }
+
+    function activarPad(j, o) {
+      let base = IMPULSO[j.modo] * (j.mini ? 0.82 : 1);
+      if (j.modo === "onda") return;
+      switch (o.color) {
+        case "amarillo": j.vy = base * 1.35 * j.grav; break;
+        case "rosa": j.vy = base * 0.9 * j.grav; break;
+        case "rojo": j.vy = base * 1.75 * j.grav; break;
+        case "azul": j.grav = -j.grav; j.vy = -j.grav * 12; break;
+      }
+      j.suelo = false;
+    }
+
+    function activarPortal(j, o) {
+      switch (o.clase) {
+        case "modo":
+          if (j.modo !== o.valor) {
+            j.modo = o.valor;
+            j.impulsoRobot = 0;
+            if (o.valor === "nave" || o.valor === "ovni") j.vy *= 0.4;
+          }
+          j.techo = o.techo;
+          break;
+        case "gravedad":
+          if (j.grav !== o.valor) { j.grav = o.valor; j.vy *= 0.5; j.suelo = false; }
+          break;
+        case "velocidad":
+          j.vel = VELOCIDADES[o.valor];
+          break;
+        case "tamaño":
+          j.mini = o.valor;
+          break;
+      }
+    }
+
+    // La araña: aparece al instante en el techo (o en el piso)
+    function teletransportar(j, L) {
+      let t = tamaño(j), g = j.grav;
+      let x0 = j.x + 0.05, x1 = j.x + t - 0.05;
+      let mejor = null;
+      for (let c = Math.floor(x0); c <= Math.floor(x1); c++) {
+        for (let o of (L.cosas[c] || [])) {
+          if (o.tipo !== "bloque" || o.x1 <= x0 || o.x >= x1) continue;
+          if (g === 1 && o.y >= j.y + t - 0.01) mejor = mejor === null ? o.y : Math.min(mejor, o.y);
+          if (g === -1 && o.y1 <= j.y + 0.01) mejor = mejor === null ? o.y1 : Math.max(mejor, o.y1);
+        }
+      }
+      if (g === 1 && j.techo !== null) mejor = mejor === null ? j.techo : Math.min(mejor, j.techo);
+      if (g === -1) mejor = mejor === null ? 0 : Math.max(mejor, 0);
+      if (mejor !== null) j.y = g === 1 ? mejor - t : mejor;
+      j.grav = -g;
+      j.vy = 0;
+      j.suelo = mejor !== null;
+    }
+
+    // 3. CONSTRUIR LOS NIVELES
+    class Constructor {
+      constructor() { this.objetos = []; this.largo = 0; this.centro = 4.5; this.monedasPuestas = 0; }
+      bloque(x, y, w, h) { if (w > 0 && h > 0) this.objetos.push({ tipo: "bloque", x: x, y: y, w: w, h: h }); }
+      pincho(x, y, dir, tam) { this.objetos.push({ tipo: "pincho", x: x, y: y, dir: dir || 1, tam: tam || 1 }); }
+      sierra(x, y, r) { this.objetos.push({ tipo: "sierra", x: x, y: y, r: r }); }
+      orbe(x, y, color) { this.objetos.push({ tipo: "orbe", x: x, y: y, color: color }); }
+      pad(x, y, color) { this.objetos.push({ tipo: "pad", x: x, y: y, color: color }); }
+      portal(x, clase, valor, techo, yc) {
+        this.objetos.push({ tipo: "portal", x: x, clase: clase, valor: valor, techo: techo === undefined ? null : techo, yc: yc || 1.5 });
+      }
+      moneda(x, y) { this.objetos.push({ tipo: "moneda", x: x, y: y }); this.monedasPuestas++; }
+      color(x, fondo, suelo) { this.objetos.push({ tipo: "color", x: x, fondo: fondo, suelo: suelo }); }
+    }
+
+    // Pedacitos de nivel. Cada uno recibe dónde empieza (x), el factor de velocidad (f),
+    // la dificultad (d), los números al azar (R) y si debe poner una moneda. Devuelve cuánto mide.
+    const PATRONES = {
+      // ---------- CUBO ----------
+      pincho(N, x) { N.pincho(x, 0); return 1; },
+      doble(N, x) { N.pincho(x, 0); N.pincho(x + 1, 0); return 2; },
+      triple(N, x) { for (let i = 0; i < 3; i++) N.pincho(x + i, 0); return 3; },
+      bloque(N, x, f, d) {
+        N.bloque(x, 0, 3, 1);
+        if (d >= 2) { N.pincho(x + 3, 0); return 4; }
+        return 3;
+      },
+      escalera(N, x, f) {
+        let w = Math.round(3 * f + 0.4);   // a más velocidad, escalones más largos
+        N.bloque(x, 0, w, 1);
+        N.bloque(x + w, 0, w, 2);
+        N.bloque(x + 2 * w, 0, w, 3);
+        for (let i = 0; i < 3; i++) N.pincho(x + 3 * w + i, 0);
+        return 3 * w + 3;
+      },
+      foso(N, x) {
+        N.pincho(x, 0); N.pincho(x + 1, 0);
+        N.bloque(x + 2, 0, 3, 1);
+        N.pincho(x + 5, 0); N.pincho(x + 6, 0);
+        return 7;
+      },
+      plataformas(N, x) {
+        N.pincho(x, 0); N.pincho(x + 1, 0);
+        N.bloque(x + 2, 0, 2, 1);
+        N.pincho(x + 4, 0); N.pincho(x + 5, 0);
+        N.bloque(x + 6, 0, 2, 2);
+        for (let i = 8; i < 11; i++) N.pincho(x + i, 0);
+        return 11;
+      },
+      orbe(N, x) {
+        for (let i = 0; i < 7; i++) N.pincho(x + i, 0);
+        N.orbe(x + 3.5, 1.4, "amarillo");
+        return 7;
+      },
+      pad(N, x, f, d, R, moneda) {
+        N.pad(x, 0, "amarillo");
+        N.bloque(x + 3, 0, 5, 3);
+        N.pincho(x + 8, 0); N.pincho(x + 9, 0);
+        if (moneda) N.moneda(x + 3.2, 4.3);
+        return 10;
+      },
+      minis(N, x) {
+        N.pincho(x, 0, 1, 0.5); N.pincho(x + 5, 0, 1, 0.5); N.pincho(x + 10, 0, 1, 0.5);
+        return 11;
+      },
+      pinchoAlto(N, x) {
+        N.bloque(x, 0, 2, 1);
+        N.pincho(x + 1, 1);
+        N.pincho(x + 2, 0);
+        return 3;
+      },
+      techoBajo(N, x) {
+        N.bloque(x, 1.5, 6, 1);
+        for (let i = 0; i < 6; i++) N.pincho(x + i, 2.5);
+        return 6;
+      },
+      orbeRosa(N, x) {
+        for (let i = 0; i < 5; i++) N.pincho(x + i, 0);
+        N.bloque(x + 5, 0, 3, 2);
+        N.orbe(x + 2.5, 1.3, "rosa");
+        return 8;
+      },
+      sierras(N, x) {
+        N.sierra(x + 1, 0.2, 0.9);
+        N.sierra(x + 6, 0.2, 0.9);
+        return 7;
+      },
+      monedaSalto(N, x, f, d, R, moneda) {
+        if (moneda) N.moneda(x + 2, 2.4);
+        return 4;
+      },
+      mini(N, x) {
+        N.portal(x, "tamaño", true);
+        N.pincho(x + 3, 0); N.pincho(x + 8, 0, 1, 0.5); N.pincho(x + 13, 0);
+        N.bloque(x + 18, 0, 2, 1);
+        N.pincho(x + 22, 0);
+        N.portal(x + 26, "tamaño", false);
+        return 27;
+      },
+
+      // ---------- NAVE y OVNI (pasar por huecos) ----------
+      columnas(N, x, f, d, R, moneda) {
+        let hueco = d <= 2 ? 4 : 3, techo = 9, ancho = 0;
+        for (let k = 0; k < 3; k++) {
+          let c = N.centro + Math.round((R() - 0.5) * 4);
+          c = Math.max(1, Math.min(techo - hueco - 1, c));
+          N.centro = c;
+          let xx = x + ancho;
+          N.bloque(xx, 0, 1, c);
+          N.bloque(xx, c + hueco, 1, techo - c - hueco);
+          if (d >= 3 && c >= 1) N.pincho(xx, c);
+          if (moneda && k === 1) N.moneda(xx + 0.5, c + hueco - 0.6);
+          ancho += Math.round(7 * f);
+        }
+        return ancho;
+      },
+      tunel(N, x, f, d, R, moneda) {
+        let hueco = d <= 2 ? 4 : 3, techo = 9, largo = Math.round(16 * f);
+        let c = Math.max(1, Math.min(techo - hueco - 1, N.centro));
+        for (let i = 0; i < largo; i++) {
+          if (i % 2 === 0 && i > 0) c = Math.max(1, Math.min(techo - hueco - 1, c + Math.floor(R() * 3) - 1));
+          N.bloque(x + i, 0, 1, c);
+          N.bloque(x + i, c + hueco, 1, techo - c - hueco);
+          if (moneda && i === Math.floor(largo / 2)) N.moneda(x + i + 0.5, c + 0.7);
+        }
+        N.centro = c;
+        return largo;
+      },
+      pinchosNave(N, x, f, d) {
+        for (let i = 0; i < 6; i++) N.pincho(x + i, 0);
+        for (let i = 3; i < 9; i++) N.pincho(x + i, 8, -1);
+        N.bloque(x + 4, 3, 2, 2);
+        return 9;
+      },
+      gravedadNave(N, x, f, d) {
+        N.portal(x, "gravedad", -1, null, 4.5);
+        for (let i = 2; i < 8; i++) N.pincho(x + i, 0);
+        N.bloque(x + 4, 6, 2, 3);
+        N.portal(x + 11, "gravedad", 1, null, 4.5);
+        return 12;
+      },
+
+      // ---------- BOLA (techo a 7 bloques) ----------
+      alternaBola(N, x, f, d, R, moneda) {
+        let techo = 7, sep = Math.round(6 * f);
+        for (let i = 0; i < 3; i++) N.pincho(x + i, 0);
+        for (let i = 0; i < 3; i++) N.pincho(x + sep + i, techo - 1, -1);
+        if (moneda) N.moneda(x + sep - 1, techo / 2);
+        return sep + 3;
+      },
+      bloquesBola(N, x, f) {
+        let techo = 7, sep = Math.round(6 * f);
+        N.bloque(x, 0, 3, 2);
+        N.bloque(x + sep, techo - 2, 3, 2);
+        return sep + 3;
+      },
+      orbeAzul(N, x) {
+        let techo = 7;
+        for (let i = 0; i < 8; i++) N.pincho(x + i, 0);
+        for (let i = 0; i < 8; i++) N.pincho(x + i, techo - 1, -1);
+        N.bloque(x + 2, 2.5, 4, 2);
+        N.orbe(x + 1, 1.2, "azul");
+        return 8;
+      },
+
+      // ---------- OVNI ----------
+      tuberias(N, x, f, d, R, moneda) {
+        let hueco = d <= 3 ? 4 : 3, techo = 9, ancho = 0;
+        for (let k = 0; k < 3; k++) {
+          let c = N.centro + Math.round((R() - 0.5) * 3);
+          c = Math.max(1, Math.min(techo - hueco - 1, c));
+          N.centro = c;
+          let xx = x + ancho;
+          N.bloque(xx, 0, 2, c);
+          N.bloque(xx, c + hueco, 2, techo - c - hueco);
+          if (moneda && k === 2) N.moneda(xx + 1, c + hueco - 0.6);
+          ancho += Math.round(7 * f);
+        }
+        return ancho;
+      },
+      sierrasOvni(N, x) {
+        N.sierra(x + 2, 1.5, 1.2);
+        N.sierra(x + 7, 7, 1.2);
+        N.sierra(x + 12, 2.5, 1.2);
+        return 14;
+      },
+
+      // ---------- ROBOT ----------
+      muro(N, x, f, d, R, moneda) {
+        N.bloque(x, 0, 2, 3);
+        for (let i = 2; i < 5; i++) N.pincho(x + i, 0);
+        if (moneda) N.moneda(x + 1, 4);
+        return 5;
+      },
+      fosoRobot(N, x) {
+        for (let i = 0; i < 5; i++) N.pincho(x + i, 0);
+        return 5;
+      },
+      escalonRobot(N, x) {
+        N.bloque(x, 0, 3, 2);
+        N.pincho(x + 3, 0); N.pincho(x + 4, 0);
+        N.bloque(x + 5, 0, 3, 3);
+        return 8;
+      },
+
+      // ---------- ARAÑA (techo a 6 bloques) ----------
+      alternaArana(N, x, f, d, R, moneda) {
+        let techo = 6, sep = Math.round(7 * f);
+        for (let i = 0; i < 5; i++) N.pincho(x + i, 0);
+        for (let i = 0; i < 5; i++) N.pincho(x + sep + i, techo - 1, -1);
+        if (moneda) N.moneda(x + 2.5, techo - 0.6);
+        return sep + 5;
+      },
+      bloquesArana(N, x, f) {
+        let techo = 6, sep = Math.round(7 * f);
+        N.bloque(x, 0, 3, 3);                  // abajo: hay que ir por el techo
+        N.bloque(x + sep, techo - 3, 3, 3);    // arriba: hay que ir por el piso
+        return sep + 3;
+      }
+    };
+    const PATRON_MONEDA = { cubo: "pad", nave: "columnas", ovni: "tuberias", bola: "alternaBola", robot: "muro", arana: "alternaArana" };
+    const TECHO_MODO = { cubo: null, robot: null, nave: 9, ovni: 9, onda: 9, bola: 7, arana: 6 };
+
+    // La onda: un pasillo en zigzag a 45 grados
+    function corredorOnda(N, x0, largo, d, R, moneda) {
+      let hueco = d <= 2 ? 4 : 3, techo = 9, piso = 3, dir = 0, tramo = 0;
+      for (let i = 0; i < largo; i++) {
+        if (i >= 4) {
+          if (tramo <= 0) {
+            let opciones = [-1, 0, 1].filter(v => piso + v >= 1 && piso + v <= techo - hueco - 1 && v !== dir);
+            dir = opciones[Math.floor(R() * opciones.length)];
+            tramo = 3 + Math.floor(R() * 4);
+          }
+          if (piso + dir >= 1 && piso + dir <= techo - hueco - 1) piso += dir;
+          tramo--;
+        }
+        N.bloque(x0 + i, 0, 1, piso);
+        N.bloque(x0 + i, piso + hueco, 1, techo - piso - hueco);
+        if (moneda && i === Math.floor(largo * 0.6)) N.moneda(x0 + i + 0.5, piso + hueco / 2);
+      }
+    }
+
+    function semillas(semilla) {
+      return function () {
+        semilla = (semilla * 16807) % 2147483647;
+        return (semilla - 1) / 2147483646;
+      };
+    }
+
+    function construirNivel(def) {
+      let N = new Constructor(), R = semillas(def.semilla);
+      let x = 14;
+      let velAnterior = "normal";
+      N.color(0, def.colores[0][0], def.colores[0][1]);
+      def.secciones.forEach((s, i) => {
+        let f = VELOCIDADES[s.vel] / VELOCIDADES.normal;
+        let anterior = i === 0 ? "cubo" : def.secciones[i - 1].modo;
+        let vuela = TECHO_MODO[anterior] !== null;
+        if (i > 0 || s.modo !== "cubo") N.portal(x, "modo", s.modo, TECHO_MODO[s.modo], vuela ? 4.5 : 1.5);
+        if (s.vel !== velAnterior) N.portal(x, "velocidad", s.vel, null, vuela ? 4.5 : 1.5);
+        velAnterior = s.vel;
+        if (i > 0) N.color(x, def.colores[i % def.colores.length][0], def.colores[i % def.colores.length][1]);
+        N.centro = 4;
+        x += Math.round(7 * f);
+        let inicio = x, fin = x + Math.round(s.largo * f);
+        let monedaPendiente = i < 3;
+        if (s.modo === "onda") {
+          corredorOnda(N, x, fin - x, s.dif, R, monedaPendiente);
+          x = fin;
+        } else {
+          while (x < fin) {
+            let nombre;
+            if (monedaPendiente && x > inicio + (fin - inicio) * 0.5) {
+              nombre = PATRON_MONEDA[s.modo] && s.patrones.includes(PATRON_MONEDA[s.modo]) ? PATRON_MONEDA[s.modo] : (s.modo === "cubo" ? "monedaSalto" : PATRON_MONEDA[s.modo]);
+            } else {
+              nombre = s.patrones[Math.floor(R() * s.patrones.length)];
+            }
+            let antes = N.monedasPuestas;
+            let ancho = PATRONES[nombre](N, x, f, s.dif, R, monedaPendiente && (nombre === PATRON_MONEDA[s.modo] || nombre === "monedaSalto"));
+            if (N.monedasPuestas > antes) monedaPendiente = false;
+            x += ancho + Math.round(Math.max(3, (7.5 - s.dif) * f) + R() * 3 * f);
+          }
+        }
+        x += Math.round(5 * f);
+      });
+      x += 12;
+      N.largo = x;
+      return N;
+    }
+
+    // Prepara el nivel para jugarlo rápido: cada cosa se guarda en su columna
+    function compilarNivel(N) {
+      let L = { largo: N.largo, cosas: [], colores: [], monedas: 0, todos: N.objetos };
+      function meter(o, x0, x1) {
+        for (let c = Math.floor(x0); c <= Math.floor(x1); c++) {
+          if (c < 0) continue;
+          (L.cosas[c] || (L.cosas[c] = [])).push(o);
+        }
+      }
+      let orbes = [], pads = [], monedas = [];
+      for (let o of N.objetos) {
+        switch (o.tipo) {
+          case "bloque":
+            o.x1 = o.x + o.w; o.y1 = o.y + o.h;
+            meter(o, o.x, o.x1);
+            break;
+          case "pincho": {
+            let s = o.tam, centro = o.x + 0.5;
+            o.hx0 = centro - 0.15 * s; o.hx1 = centro + 0.15 * s;
+            if (o.dir === 1) { o.hy0 = o.y; o.hy1 = o.y + 0.5 * s; }
+            else { o.hy0 = o.y + 1 - 0.5 * s; o.hy1 = o.y + 1; }
+            meter(o, o.x, o.x + 1);
+            break;
+          }
+          case "sierra": meter(o, o.x - o.r, o.x + o.r); break;
+          case "orbe": orbes.push(o); meter(o, o.x - 1, o.x + 1); break;
+          case "pad": o.hy0 = o.y; o.hy1 = o.y + 0.3; pads.push(o); meter(o, o.x, o.x + 1); break;
+          case "portal": meter(o, o.x - 1, o.x + 1); break;
+          case "moneda": monedas.push(o); meter(o, o.x - 1, o.x + 1); break;
+          case "color": L.colores.push(o); break;
+        }
+      }
+      orbes.sort((a, b) => a.x - b.x).forEach((o, i) => o.id = i);
+      pads.sort((a, b) => a.x - b.x).forEach((o, i) => o.id = i);
+      monedas.sort((a, b) => a.x - b.x).forEach((o, i) => o.id = i);
+      L.monedas = monedas.length;
+      L.colores.sort((a, b) => a.x - b.x);
+      L.dibujables = N.objetos.filter(o => o.tipo !== "color").sort((a, b) => a.x - b.x);
+      return L;
+    }
+
+    // 4. LOS NIVELES (como los oficiales: cada uno enseña algo nuevo)
+    const CUBO_FACIL = ["pincho", "doble", "bloque", "foso", "minis"];
+    const CUBO_NORMAL = ["pincho", "doble", "triple", "bloque", "foso", "plataformas", "pad", "orbe"];
+    const CUBO_DIFICIL = ["doble", "triple", "escalera", "plataformas", "orbe", "orbeRosa", "pinchoAlto", "pad", "sierras"];
+    const CUBO_INSANO = ["triple", "escalera", "plataformas", "orbe", "orbeRosa", "pinchoAlto", "techoBajo", "sierras", "mini"];
+    const NIVELES = [
+      { nombre: "Locura Estéreo", dificultad: "facil", estrellas: 1, semilla: 101,
+        colores: [["#2f62ff", "#1f45d6"], ["#7a2fff", "#5a1fd6"], ["#2f62ff", "#1f45d6"]],
+        musica: { bpm: 160, raiz: 3, escala: "mayor", prog: [0, 4, 5, 3], estilo: 0, semilla: 11 },
+        secciones: [
+          { modo: "cubo", vel: "normal", largo: 190, dif: 1, patrones: CUBO_FACIL },
+          { modo: "nave", vel: "normal", largo: 110, dif: 1, patrones: ["columnas", "columnas", "tunel"] },
+          { modo: "cubo", vel: "normal", largo: 190, dif: 1, patrones: CUBO_FACIL.concat(["triple"]) }
+        ] },
+      { nombre: "De Vuelta al Camino", dificultad: "facil", estrellas: 2, semilla: 202,
+        colores: [["#ff2fa8", "#c41f7e"], ["#ff7b2f", "#d6561f"], ["#ff2fa8", "#c41f7e"]],
+        musica: { bpm: 140, raiz: 5, escala: "menor", prog: [0, 5, 3, 4], estilo: 1, semilla: 22 },
+        secciones: [
+          { modo: "cubo", vel: "normal", largo: 220, dif: 1, patrones: ["pincho", "doble", "pad", "foso", "bloque", "triple"] },
+          { modo: "nave", vel: "normal", largo: 120, dif: 1, patrones: ["columnas", "tunel"] },
+          { modo: "cubo", vel: "normal", largo: 200, dif: 2, patrones: ["doble", "triple", "pad", "foso", "plataformas"] }
+        ] },
+      { nombre: "Espíritu Polar", dificultad: "normal", estrellas: 3, semilla: 303,
+        colores: [["#16b85a", "#0f8a42"], ["#13a8b8", "#0d7f8a"], ["#16b85a", "#0f8a42"], ["#13a8b8", "#0d7f8a"]],
+        musica: { bpm: 175, raiz: 0, escala: "menor", prog: [0, 3, 5, 4], estilo: 0, semilla: 33 },
+        secciones: [
+          { modo: "cubo", vel: "normal", largo: 210, dif: 2, patrones: CUBO_NORMAL },
+          { modo: "nave", vel: "normal", largo: 140, dif: 2, patrones: ["columnas", "tunel", "pinchosNave"] },
+          { modo: "cubo", vel: "normal", largo: 210, dif: 2, patrones: CUBO_NORMAL.concat(["orbe", "orbe"]) }
+        ] },
+      { nombre: "Secado Total", dificultad: "normal", estrellas: 4, semilla: 404,
+        colores: [["#d68a1a", "#a8670f"], ["#c9451a", "#9b3010"], ["#d68a1a", "#a8670f"], ["#8a6b1a", "#6b5010"]],
+        musica: { bpm: 150, raiz: 7, escala: "menor", prog: [0, 6, 5, 4], estilo: 1, semilla: 44 },
+        secciones: [
+          { modo: "cubo", vel: "normal", largo: 200, dif: 2, patrones: CUBO_NORMAL.concat(["mini"]) },
+          { modo: "nave", vel: "normal", largo: 150, dif: 2, patrones: ["columnas", "tunel", "gravedadNave"] },
+          { modo: "cubo", vel: "normal", largo: 220, dif: 2, patrones: CUBO_NORMAL.concat(["mini", "pinchoAlto"]) }
+        ] },
+      { nombre: "Base tras Base", dificultad: "dificil", estrellas: 5, semilla: 505,
+        colores: [["#8a2fff", "#6a1fd6"], ["#ff3f6a", "#d62f50"], ["#8a2fff", "#6a1fd6"], ["#2f8aff", "#1f6ad6"]],
+        musica: { bpm: 145, raiz: 2, escala: "menor", prog: [0, 5, 6, 4], estilo: 2, semilla: 55 },
+        secciones: [
+          { modo: "cubo", vel: "normal", largo: 170, dif: 2, patrones: CUBO_NORMAL },
+          { modo: "bola", vel: "normal", largo: 150, dif: 2, patrones: ["alternaBola", "bloquesBola", "alternaBola"] },
+          { modo: "cubo", vel: "normal", largo: 180, dif: 3, patrones: CUBO_DIFICIL },
+          { modo: "nave", vel: "normal", largo: 140, dif: 2, patrones: ["columnas", "tunel", "pinchosNave"] }
+        ] },
+      { nombre: "No Puedo Soltar", dificultad: "dificil", estrellas: 6, semilla: 606,
+        colores: [["#e0153a", "#ad0f2c"], ["#ff8a00", "#cc6e00"], ["#e0153a", "#ad0f2c"], ["#c0157a", "#900f5c"]],
+        musica: { bpm: 170, raiz: 9, escala: "menor", prog: [0, 3, 4, 4], estilo: 0, semilla: 66 },
+        secciones: [
+          { modo: "bola", vel: "normal", largo: 160, dif: 2, patrones: ["alternaBola", "bloquesBola", "orbeAzul"] },
+          { modo: "cubo", vel: "rapida", largo: 200, dif: 3, patrones: CUBO_DIFICIL },
+          { modo: "nave", vel: "normal", largo: 150, dif: 3, patrones: ["columnas", "tunel", "gravedadNave"] },
+          { modo: "bola", vel: "rapida", largo: 140, dif: 3, patrones: ["alternaBola", "bloquesBola"] }
+        ] },
+      { nombre: "Saltarín", dificultad: "masDificil", estrellas: 7, semilla: 707,
+        colores: [["#0fb0a0", "#0a8a7c"], ["#4a3fff", "#352ad6"], ["#0fb0a0", "#0a8a7c"]],
+        musica: { bpm: 160, raiz: 4, escala: "mayor", prog: [0, 5, 3, 4], estilo: 1, semilla: 77 },
+        secciones: [
+          { modo: "ovni", vel: "normal", largo: 170, dif: 2, patrones: ["tuberias", "sierrasOvni"] },
+          { modo: "cubo", vel: "normal", largo: 200, dif: 3, patrones: CUBO_DIFICIL },
+          { modo: "ovni", vel: "rapida", largo: 170, dif: 3, patrones: ["tuberias", "tuberias", "sierrasOvni"] },
+          { modo: "cubo", vel: "rapida", largo: 160, dif: 3, patrones: CUBO_DIFICIL }
+        ] },
+      { nombre: "Máquina del Tiempo", dificultad: "masDificil", estrellas: 8, semilla: 808,
+        colores: [["#3a3a8a", "#28286b"], ["#8a3a8a", "#6b286b"], ["#3a8a8a", "#286b6b"], ["#8a6a3a", "#6b5028"]],
+        musica: { bpm: 150, raiz: 1, escala: "menor", prog: [0, 5, 2, 4], estilo: 2, semilla: 88 },
+        secciones: [
+          { modo: "cubo", vel: "rapida", largo: 200, dif: 3, patrones: CUBO_DIFICIL },
+          { modo: "nave", vel: "rapida", largo: 150, dif: 3, patrones: ["columnas", "tunel", "pinchosNave", "gravedadNave"] },
+          { modo: "ovni", vel: "normal", largo: 150, dif: 3, patrones: ["tuberias", "sierrasOvni"] },
+          { modo: "bola", vel: "rapida", largo: 140, dif: 3, patrones: ["alternaBola", "bloquesBola", "orbeAzul"] }
+        ] },
+      { nombre: "Ciclos", dificultad: "insano", estrellas: 9, semilla: 909,
+        colores: [["#0a9adf", "#0778ad"], ["#df0a8a", "#ad076b"], ["#0a9adf", "#0778ad"], ["#5a0adf", "#4507ad"]],
+        musica: { bpm: 165, raiz: 6, escala: "menor", prog: [0, 4, 5, 3], estilo: 0, semilla: 99 },
+        secciones: [
+          { modo: "onda", vel: "normal", largo: 130, dif: 2, patrones: [] },
+          { modo: "cubo", vel: "rapida", largo: 190, dif: 3, patrones: CUBO_DIFICIL },
+          { modo: "onda", vel: "rapida", largo: 140, dif: 3, patrones: [] },
+          { modo: "nave", vel: "rapida", largo: 150, dif: 3, patrones: ["columnas", "tunel", "pinchosNave"] }
+        ] },
+      { nombre: "Dominación Geométrica", dificultad: "insano", estrellas: 10, semilla: 1010,
+        colores: [["#1a1a1a", "#3a3a3a"], ["#5a1a8a", "#3d1260"], ["#1a5a3a", "#124028"], ["#8a1a1a", "#601212"]],
+        musica: { bpm: 135, raiz: 8, escala: "menor", prog: [0, 6, 5, 4], estilo: 2, semilla: 1010 },
+        secciones: [
+          { modo: "robot", vel: "normal", largo: 180, dif: 3, patrones: ["muro", "fosoRobot", "escalonRobot"] },
+          { modo: "arana", vel: "normal", largo: 170, dif: 3, patrones: ["alternaArana", "bloquesArana"] },
+          { modo: "onda", vel: "rapida", largo: 140, dif: 3, patrones: [] },
+          { modo: "cubo", vel: "rapida", largo: 180, dif: 4, patrones: CUBO_INSANO }
+        ] },
+      { nombre: "Paso del Club", dificultad: "demonio", estrellas: 14, semilla: 1111,
+        colores: [["#3a0000", "#200000"], ["#00203a", "#001020"], ["#3a003a", "#200020"], ["#003a10", "#002008"], ["#3a2000", "#201000"]],
+        musica: { bpm: 128, raiz: 10, escala: "menor", prog: [0, 0, 5, 6], estilo: 2, semilla: 1111 },
+        secciones: [
+          { modo: "cubo", vel: "rapida", largo: 190, dif: 4, patrones: CUBO_INSANO },
+          { modo: "nave", vel: "rapida", largo: 160, dif: 4, patrones: ["columnas", "tunel", "pinchosNave", "gravedadNave"] },
+          { modo: "bola", vel: "rapida", largo: 150, dif: 4, patrones: ["alternaBola", "bloquesBola", "orbeAzul"] },
+          { modo: "onda", vel: "rapida", largo: 140, dif: 4, patrones: [] },
+          { modo: "ovni", vel: "rapida", largo: 150, dif: 4, patrones: ["tuberias", "sierrasOvni"] },
+          { modo: "cubo", vel: "muyRapida", largo: 180, dif: 4, patrones: CUBO_INSANO }
+        ] }
+    ];
+    const DIFICULTADES = {
+      facil: { nombre: "Fácil", color: "#3dd6ff" }, normal: { nombre: "Normal", color: "#3dff6b" },
+      dificil: { nombre: "Difícil", color: "#ffb000" }, masDificil: { nombre: "Más difícil", color: "#ff4b2b" },
+      insano: { nombre: "Insano", color: "#ff3fd0" }, demonio: { nombre: "Demonio", color: "#ff1a1a" }
+    };
+    const compilados = [];
+    function nivelCompilado(i) {
+      if (!compilados[i]) compilados[i] = compilarNivel(construirNivel(NIVELES[i]));
+      return compilados[i];
+    }
+
+    // 5. GUARDAR EL PROGRESO
+    const COLORES = ["#7dff00", "#00ff00", "#00ff7d", "#00ffff", "#007dff", "#0000ff", "#7d00ff", "#ff00ff",
+                     "#ff007d", "#ff0000", "#ff7d00", "#ffff00", "#ffffff", "#b9b9b9", "#7d7d7d", "#3e3e3e",
+                     "#ff9ccf", "#ffd27d", "#a0ffa0", "#7dd7ff", "#c87dff", "#7d3e00", "#004b00", "#000f7d"];
+    const MODOS = ["cubo", "nave", "bola", "ovni", "onda", "robot", "arana"];
+    const CANTIDAD_ICONOS = { cubo: 40, nave: 16, bola: 16, ovni: 12, onda: 12, robot: 8, arana: 8 };
+    const NOMBRE_MODO = { cubo: "Cubo", nave: "Nave", bola: "Bola", ovni: "Ovni", onda: "Onda", robot: "Robot", arana: "Araña" };
+    let datos = { niveles: {}, icono: { cubo: 0, nave: 0, bola: 0, ovni: 0, onda: 0, robot: 0, arana: 0 }, c1: 0, c2: 3, musica: true };
+    try {
+      let guardado = JSON.parse(localStorage.getItem("geoDash"));
+      if (guardado) datos = Object.assign(datos, guardado);
+    } catch (e) {}
+    function guardar() {
+      try { localStorage.setItem("geoDash", JSON.stringify(datos)); } catch (e) {}
+    }
+    function progresoDe(i) {
+      return datos.niveles[i] || (datos.niveles[i] = { normal: 0, practica: 0, monedas: 0, completado: false, intentos: 0 });
+    }
+
+    // 6. MÚSICA (hecha por el navegador, cada nivel con su propia canción)
+    let audio = null, cancion = null;
+    const ESCALAS = { mayor: [0, 2, 4, 5, 7, 9, 11], menor: [0, 2, 3, 5, 7, 8, 10] };
+    const BOMBOS = [[0, 4, 8, 12], [0, 6, 8, 11, 14], [0, 3, 6, 8, 10, 12]];
+    const BAJOS = [[1, 0, 2, 0, 1, 0, 2, 0, 1, 0, 2, 0, 1, 0, 2, 1],
+                   [1, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 1, 0, 2, 0, 1],
+                   [1, 1, 0, 1, 1, 0, 1, 0, 1, 1, 0, 1, 2, 0, 2, 0]];
+    let bufferRuido = null;
+    function iniciarAudio() {
+      try {
+        if (!audio) {
+          audio = new (window.AudioContext || window.webkitAudioContext)();
+          bufferRuido = audio.createBuffer(1, audio.sampleRate, audio.sampleRate);
+          let d = bufferRuido.getChannelData(0);
+          for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+        }
+        if (audio.state === "suspended") audio.resume();
+      } catch (e) {}
+    }
+    function azarFijo(a, b, c) {
+      let v = Math.sin(a * 12.9898 + b * 78.233 + c * 37.719) * 43758.5453;
+      return v - Math.floor(v);
+    }
+    function notaDe(def, grado, octava) {
+      let esc = ESCALAS[def.escala];
+      let o = Math.floor(grado / 7), g = ((grado % 7) + 7) % 7;
+      return 110 * Math.pow(2, (def.raiz + esc[g] + 12 * (o + octava)) / 12);
+    }
+    function voz(destino, tipo, f, t, dur, vol, corte) {
+      let o = audio.createOscillator(), g = audio.createGain();
+      o.type = tipo;
+      o.frequency.setValueAtTime(f, t);
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(vol, t + 0.006);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      if (corte) {
+        let fl = audio.createBiquadFilter();
+        fl.type = "lowpass";
+        fl.frequency.setValueAtTime(corte, t);
+        o.connect(fl).connect(g);
+      } else {
+        o.connect(g);
+      }
+      g.connect(destino);
+      o.start(t);
+      o.stop(t + dur + 0.05);
+    }
+    function ruido(destino, t, dur, vol, tipo, fc) {
+      let s = audio.createBufferSource(), fl = audio.createBiquadFilter(), g = audio.createGain();
+      s.buffer = bufferRuido;
+      fl.type = tipo;
+      fl.frequency.value = fc;
+      g.gain.setValueAtTime(vol, t);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      s.connect(fl).connect(g).connect(destino);
+      s.start(t, Math.random() * 0.5);
+      s.stop(t + dur + 0.05);
+    }
+    function bombo(destino, t) {
+      let o = audio.createOscillator(), g = audio.createGain();
+      o.frequency.setValueAtTime(150, t);
+      o.frequency.exponentialRampToValueAtTime(42, t + 0.13);
+      g.gain.setValueAtTime(0.9, t);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.28);
+      o.connect(g).connect(destino);
+      o.start(t);
+      o.stop(t + 0.3);
+    }
+    function empezarMusica(def) {
+      detenerMusica();
+      if (!audio || !datos.musica) return;
+      let maestro = audio.createGain();
+      maestro.gain.value = 0.32;
+      maestro.connect(audio.destination);
+      cancion = { def: def, inicio: audio.currentTime + 0.06, paso: 0, maestro: maestro };
+    }
+    function detenerMusica() {
+      if (cancion) {
+        let m = cancion.maestro;
+        m.gain.setTargetAtTime(0, audio.currentTime, 0.03);
+        setTimeout(() => m.disconnect(), 400);
+        cancion = null;
+      }
+    }
+    function programarMusica() {
+      if (!cancion || !audio) return;
+      let s16 = 60 / cancion.def.bpm / 4;
+      while (cancion.inicio + cancion.paso * s16 < audio.currentTime + 0.15) {
+        tocarPaso(cancion, cancion.paso, cancion.inicio + cancion.paso * s16, s16);
+        cancion.paso++;
+      }
+    }
+    function tocarPaso(c, n, t, s16) {
+      let def = c.def, m = c.maestro;
+      let compas = Math.floor(n / 16), p = n % 16;
+      let acorde = def.prog[compas % def.prog.length];
+      let fuerza = compas < 2 ? 0 : compas < 4 ? 1 : (compas % 16 >= 14 ? 1 : 2);
+      if (BOMBOS[def.estilo].includes(p)) bombo(m, t);
+      if (fuerza >= 1 && (p === 4 || p === 12)) ruido(m, t, 0.18, 0.35, "bandpass", 1800);
+      if (p % 2 === 1 || (fuerza === 2 && azarFijo(def.semilla, compas, p) > 0.6)) ruido(m, t, 0.05, p % 2 ? 0.12 : 0.06, "highpass", 7000);
+      let b = BAJOS[def.estilo][p];
+      if (b) voz(m, "sawtooth", notaDe(def, acorde, b === 2 ? -1 : -2), t, s16 * 1.8, 0.22, 900);
+      if (fuerza >= 1 && p === 0) {
+        for (let k of [0, 2, 4]) voz(m, "triangle", notaDe(def, acorde + k, 0), t, s16 * 15, 0.05);
+      }
+      if (fuerza === 2) {
+        let frase = Math.floor(compas / 2) % 4;
+        let ritmo = azarFijo(def.semilla, frase, p % 8 + (compas % 2) * 8);
+        if (ritmo > 0.42 || p % 4 === 0) {
+          let salto = [0, 2, 4, 7, 4, 2, 5, 3][Math.floor(azarFijo(def.semilla + 1, frase, p) * 8)];
+          voz(m, "square", notaDe(def, acorde + salto, 1), t, s16 * 1.6, 0.07, 3500);
+        }
+      }
+    }
+    // Qué tan fuerte está el golpe del ritmo ahorita (para que todo "pulse")
+    function pulso() {
+      let bpm = juego ? juego.def.musica.bpm : 130;
+      let seg = cancion && audio ? audio.currentTime - cancion.inicio : performance.now() / 1000;
+      let b = seg * bpm / 60;
+      return Math.exp(-(b - Math.floor(b)) * 5);
+    }
+    function sonidoMuerte() {
+      if (!audio) return;
+      let g = audio.createGain();
+      g.gain.value = 0.5;
+      g.connect(audio.destination);
+      ruido(g, audio.currentTime, 0.5, 0.6, "lowpass", 2500);
+      voz(g, "square", 180, audio.currentTime, 0.3, 0.15, 800);
+    }
+    function sonidoGanar() {
+      if (!audio) return;
+      let g = audio.createGain();
+      g.gain.value = 0.4;
+      g.connect(audio.destination);
+      [523, 659, 784, 1047, 1319].forEach((f, i) => voz(g, "square", f, audio.currentTime + i * 0.09, 0.4, 0.12, 4000));
+    }
+    function sonidoMoneda() {
+      if (!audio) return;
+      let g = audio.createGain();
+      g.gain.value = 0.4;
+      g.connect(audio.destination);
+      voz(g, "square", 1319, audio.currentTime, 0.12, 0.1);
+      voz(g, "square", 1760, audio.currentTime + 0.08, 0.3, 0.1);
+    }
+    const MUSICA_MENU = { bpm: 120, raiz: 3, escala: "mayor", prog: [0, 5, 3, 4], estilo: 0, semilla: 7 };
+
+    // 7. DIBUJAR ICONOS (todos los personajes se dibujan en un cuadro de -0.5 a 0.5)
+    function contorno(g, ancho) {
+      g.lineWidth = ancho || 0.07;
+      g.strokeStyle = "#000";
+      g.stroke();
+    }
+    function rect(g, x, y, w, h, color) {
+      g.beginPath();
+      g.rect(x, y, w, h);
+      g.fillStyle = color;
+      g.fill();
+      contorno(g);
+    }
+    function poligono(g, puntos, color) {
+      g.beginPath();
+      puntos.forEach((p, i) => i ? g.lineTo(p[0], p[1]) : g.moveTo(p[0], p[1]));
+      g.closePath();
+      g.fillStyle = color;
+      g.fill();
+      contorno(g);
+    }
+    function redondo(g, x, y, r, color) {
+      g.beginPath();
+      g.arc(x, y, r, 0, Math.PI * 2);
+      g.fillStyle = color;
+      g.fill();
+      contorno(g);
+    }
+
+    function dibujarCara(g, cara) {
+      switch (cara) {
+        case 1:
+          rect(g, -0.3, -0.2, 0.18, 0.18, "#fff");
+          rect(g, 0.12, -0.2, 0.18, 0.18, "#fff");
+          break;
+        case 2:
+          poligono(g, [[-0.32, -0.25], [-0.08, -0.12], [-0.08, 0.02], [-0.32, 0.0]], "#fff");
+          poligono(g, [[0.32, -0.25], [0.08, -0.12], [0.08, 0.02], [0.32, 0.0]], "#fff");
+          rect(g, -0.2, 0.18, 0.4, 0.08, "#fff");
+          break;
+        case 3:
+          redondo(g, 0, -0.04, 0.2, "#fff");
+          redondo(g, 0.05, -0.04, 0.09, "#000");
+          break;
+        case 4:
+          g.lineWidth = 0.08; g.strokeStyle = "#000";
+          g.beginPath(); g.moveTo(-0.32, -0.08); g.lineTo(-0.2, -0.22); g.lineTo(-0.08, -0.08); g.stroke();
+          g.beginPath(); g.moveTo(0.08, -0.08); g.lineTo(0.2, -0.22); g.lineTo(0.32, -0.08); g.stroke();
+          g.beginPath(); g.arc(0, 0.06, 0.2, 0.15 * Math.PI, 0.85 * Math.PI); g.stroke();
+          break;
+      }
+    }
+
+    function dibujarCubo(g, i, c1, c2) {
+      let fondo = i % 8, cara = Math.floor(i / 8) % 5;
+      g.lineJoin = "round";
+      rect(g, -0.5, -0.5, 1, 1, c1);
+      switch (fondo) {
+        case 0: rect(g, -0.3, -0.3, 0.6, 0.6, c2); break;
+        case 1: poligono(g, [[-0.5, 0.5], [0.5, -0.5], [0.5, 0.5]], c2); break;
+        case 2: rect(g, -0.13, -0.5, 0.26, 1, c2); rect(g, -0.5, -0.13, 1, 0.26, c2); break;
+        case 3: rect(g, -0.38, -0.38, 0.76, 0.76, c2); rect(g, -0.24, -0.24, 0.48, 0.48, c1); rect(g, -0.1, -0.1, 0.2, 0.2, c2); break;
+        case 4: for (let [a, b] of [[-0.5, -0.5], [0.22, -0.5], [-0.5, 0.22], [0.22, 0.22]]) rect(g, a, b, 0.28, 0.28, c2); break;
+        case 5: redondo(g, 0, 0, 0.32, c2); break;
+        case 6: rect(g, -0.5, -0.5, 1, 0.22, c2); rect(g, -0.5, -0.11, 1, 0.22, c2); rect(g, -0.5, 0.28, 1, 0.22, c2); break;
+        case 7: poligono(g, [[0, -0.42], [0.42, 0], [0, 0.42], [-0.42, 0]], c2); break;
+      }
+      dibujarCara(g, cara);
+      g.beginPath();
+      g.rect(-0.5, -0.5, 1, 1);
+      contorno(g, 0.09);
+    }
+
+    function dibujarNave(g, i, c1, c2, cubo) {
+      // El cubito va sentado arriba
+      g.save();
+      g.translate(-0.05, -0.28);
+      g.scale(0.5, 0.5);
+      dibujarCubo(g, cubo, c1, c2);
+      g.restore();
+      let punta = 0.75 + (i % 4) * 0.06, alto = 0.28 + (Math.floor(i / 4) % 2) * 0.06;
+      let casco = [[punta, 0.08], [0.25, -0.05], [-0.55, -0.08], [-0.7, 0.05], [-0.55, alto], [0.45, alto]];
+      if (i % 3 === 1) poligono(g, [[-0.4, -0.05], [-0.78, -0.35], [-0.62, -0.05]], c2);
+      if (i % 3 === 2) poligono(g, [[-0.1, alto], [-0.45, alto + 0.25], [-0.55, alto]], c2);
+      poligono(g, casco, c1);
+      if (Math.floor(i / 8) % 2 === 0) poligono(g, [[punta - 0.1, 0.1], [0.2, 0.06], [-0.5, 0.06], [-0.5, 0.16], [0.35, 0.18]], c2);
+      else redondo(g, 0.25, 0.14, 0.08, c2);
+    }
+
+    function dibujarBola(g, i, c1, c2) {
+      let estilo = i % 4;
+      if (estilo === 2) {
+        for (let k = 0; k < 8; k++) {
+          let a = k * Math.PI / 4;
+          poligono(g, [[Math.cos(a - 0.25) * 0.38, Math.sin(a - 0.25) * 0.38], [Math.cos(a) * 0.55, Math.sin(a) * 0.55], [Math.cos(a + 0.25) * 0.38, Math.sin(a + 0.25) * 0.38]], c2);
+        }
+      }
+      redondo(g, 0, 0, estilo === 2 ? 0.4 : 0.48, c1);
+      if (estilo === 0) redondo(g, 0, 0, 0.25, c2);
+      if (estilo === 1) {
+        for (let k = 0; k < 4; k++) {
+          g.beginPath(); g.moveTo(0, 0); g.arc(0, 0, 0.48, k * Math.PI / 2, k * Math.PI / 2 + Math.PI / 4); g.closePath();
+          g.fillStyle = c2; g.fill(); contorno(g);
+        }
+      }
+      if (estilo === 3) { redondo(g, 0.05, -0.05, 0.2, "#fff"); redondo(g, 0.1, -0.05, 0.09, "#000"); }
+      if (i >= 4) { g.beginPath(); g.arc(0, 0, 0.36, 0, Math.PI * 2); g.lineWidth = 0.06; g.strokeStyle = c2; g.stroke(); }
+      if (i >= 8) redondo(g, 0, 0, 0.08, "#fff");
+      if (i >= 12) for (let k = 0; k < 4; k++) redondo(g, Math.cos(k * Math.PI / 2 + 0.78) * 0.3, Math.sin(k * Math.PI / 2 + 0.78) * 0.3, 0.06, c2);
+    }
+
+    function dibujarOvni(g, i, c1, c2, cubo) {
+      g.save();
+      g.beginPath();
+      g.ellipse(0, -0.05, 0.32, 0.38, 0, Math.PI, 0);
+      g.fillStyle = "rgba(170, 230, 255, 0.55)";
+      g.fill();
+      contorno(g, 0.05);
+      g.translate(0, -0.18);
+      g.scale(0.38, 0.38);
+      dibujarCubo(g, cubo, c1, c2);
+      g.restore();
+      let ancho = 0.5 + (i % 3) * 0.05;
+      g.beginPath();
+      g.ellipse(0, 0.08, ancho, 0.17, 0, 0, Math.PI * 2);
+      g.fillStyle = c1;
+      g.fill();
+      contorno(g);
+      g.beginPath();
+      g.ellipse(0, 0.12, ancho * 0.7, 0.08, 0, 0, Math.PI * 2);
+      g.fillStyle = c2;
+      g.fill();
+      contorno(g, 0.04);
+      if (Math.floor(i / 3) % 2) for (let k = -1; k <= 1; k++) redondo(g, k * 0.25, 0.1, 0.045, "#fff");
+      if (Math.floor(i / 6) % 2) {
+        poligono(g, [[-0.3, 0.2], [-0.4, 0.38], [-0.26, 0.24]], c2);
+        poligono(g, [[0.3, 0.2], [0.4, 0.38], [0.26, 0.24]], c2);
+      }
+    }
+
+    function dibujarOnda(g, i, c1, c2) {
+      let k = i % 4;
+      let forma = k === 0 ? [[0.5, 0], [-0.45, -0.4], [-0.25, 0], [-0.45, 0.4]]
+                : k === 1 ? [[0.5, 0], [-0.45, -0.35], [-0.45, 0.35]]
+                : k === 2 ? [[0.5, 0], [0, -0.3], [-0.45, -0.4], [-0.3, 0], [-0.45, 0.4], [0, 0.3]]
+                : [[0.5, 0], [-0.1, -0.42], [-0.45, -0.15], [-0.45, 0.15], [-0.1, 0.42]];
+      poligono(g, forma, c1);
+      if (i >= 4) poligono(g, [[0.25, 0], [-0.15, -0.14], [-0.15, 0.14]], c2);
+      if (i >= 8) redondo(g, 0.05, 0, 0.07, "#fff");
+    }
+
+    function dibujarRobot(g, i, c1, c2, fase) {
+      let paso = Math.sin(fase || 0) * 0.12;
+      rect(g, -0.32 + paso, 0.2, 0.16, 0.3, c2);
+      rect(g, 0.16 - paso, 0.2, 0.16, 0.3, c2);
+      rect(g, -0.4, -0.05, 0.8, 0.32, c1);
+      rect(g, -0.32, -0.5, 0.64, 0.46, i % 2 ? c2 : c1);
+      rect(g, -0.18 + (i % 4 >= 2 ? 0.1 : 0), -0.36, 0.38, 0.14, "#fff");
+      if (i >= 4) rect(g, -0.06, -0.62, 0.12, 0.12, c2);
+    }
+
+    function dibujarArana(g, i, c1, c2, fase) {
+      let m = Math.sin(fase || 0) * 0.1;
+      g.lineWidth = 0.09;
+      g.strokeStyle = "#000";
+      for (let k = 0; k < 4; k++) {
+        let x = -0.36 + k * 0.24, d = k % 2 ? m : -m;
+        g.beginPath(); g.moveTo(x * 0.6, 0.05); g.lineTo(x + d, 0.25); g.lineTo(x * 1.2 + d, 0.5); g.stroke();
+      }
+      g.beginPath();
+      g.ellipse(0, -0.05, 0.45, 0.3, 0, 0, Math.PI * 2);
+      g.fillStyle = c1;
+      g.fill();
+      contorno(g);
+      if (i % 2) poligono(g, [[-0.3, -0.25], [0.3, -0.25], [0, -0.45]], c2);
+      redondo(g, 0.15, -0.08, 0.1, c2);
+      redondo(g, 0.32, -0.08, 0.07, c2);
+      if (i >= 4) redondo(g, -0.2, -0.05, 0.08, "#fff");
+    }
+
+    function dibujarIcono(g, modo, i, c1, c2, fase) {
+      let cubo = datos.icono.cubo;
+      switch (modo) {
+        case "cubo": dibujarCubo(g, i, c1, c2); break;
+        case "nave": dibujarNave(g, i, c1, c2, cubo); break;
+        case "bola": dibujarBola(g, i, c1, c2); break;
+        case "ovni": dibujarOvni(g, i, c1, c2, cubo); break;
+        case "onda": dibujarOnda(g, i, c1, c2); break;
+        case "robot": dibujarRobot(g, i, c1, c2, fase); break;
+        case "arana": dibujarArana(g, i, c1, c2, fase); break;
+      }
+    }
+
+    // 8. EL JUEGO
+    let pantalla = "menu";          // menu, niveles, iconos, juego
+    let juego = null;
+    let sostiene = false;
+    let nivelElegido = 0;
+    let tabIconos = "cubo";
+    let cuadro = 0;
+    let particulas = [];
+
+    function jugarNivel(i) {
+      iniciarAudio();
+      nivelElegido = i;
+      let L = nivelCompilado(i);
+      juego = { idx: i, def: NIVELES[i], L: L, intentos: 0, practica: false, checkpoints: [], estado: "jugando",
+                t: 0, j: null, estela: [], camX: 0, camY: -2.6, fondo: null, suelo: null, inicioIntento: 0, rot: 0,
+                maxX: 0, tiempo: 0, saltos: 0 };
+      pantalla = "juego";
+      nuevoIntento();
+    }
+
+    function nuevoIntento() {
+      let cp = juego.practica ? juego.checkpoints[juego.checkpoints.length - 1] : null;
+      juego.intentos++;
+      progresoDe(juego.idx).intentos++;
+      juego.j = cp ? clonar(cp.j) : nuevoJugador();
+      juego.j.sosteniaAntes = true;
+      juego.j.muerto = false;
+      juego.estado = "jugando";
+      juego.t = 0;
+      juego.estela = [];
+      juego.rot = 0;
+      juego.inicioIntento = juego.j.x;
+      juego.camX = juego.j.x - visibles() * 0.3;
+      particulas = [];
+      let c = colorEn(juego.j.x);
+      juego.fondo = hexARgb(c.fondo);
+      juego.suelo = hexARgb(c.suelo);
+      if (!juego.practica || !cancion) empezarMusica(juego.def.musica);
+    }
+
+    function visibles() {
+      return PW / tamBloque();
+    }
+    function tamBloque() {
+      return PH / 11;
+    }
+
+    function colorEn(x) {
+      let c = juego.L.colores[0];
+      for (let o of juego.L.colores) if (o.x <= x) c = o;
+      return c;
+    }
+    function hexARgb(h) {
+      return [parseInt(h.substr(1, 2), 16), parseInt(h.substr(3, 2), 16), parseInt(h.substr(5, 2), 16)];
+    }
+    function rgb(c, mas) {
+      mas = mas || 0;
+      return "rgb(" + Math.min(255, Math.round(c[0] + mas)) + "," + Math.min(255, Math.round(c[1] + mas)) + "," + Math.min(255, Math.round(c[2] + mas)) + ")";
+    }
+
+    function actualizarJuego() {
+      let J = juego, j = J.j;
+      J.t++;
+      if (J.estado === "pausa") return;
+      if (J.estado === "muerto") {
+        actualizarParticulas();
+        if (J.t >= 60) nuevoIntento();
+        return;
+      }
+      if (J.estado === "completado") {
+        j.x += j.vel / 60;
+        actualizarParticulas();
+        if (J.t % 8 === 0 && J.t < 120) explosion(j.x + Math.random() * 6, 2 + Math.random() * 5, COLORES[Math.floor(Math.random() * COLORES.length)], 14);
+        return;
+      }
+
+      let monedasAntes = j.monedas;
+      pasoFisica(j, J.L, sostiene);
+      J.tiempo++;
+      if (j.monedas !== monedasAntes) {
+        sonidoMoneda();
+        explosion(j.x + 0.5, j.y + 0.5, "#ffd700", 12);
+      }
+
+      // Guardar el avance
+      let pct = Math.min(100, Math.floor(j.x / J.L.largo * 100));
+      if (j.muerto) {
+        morir(pct);
+        return;
+      }
+      if (j.gano) {
+        ganar();
+        return;
+      }
+
+      // Puntos de control automáticos en práctica
+      if (J.practica && J.t % 120 === 0 && (j.suelo || j.modo === "nave" || j.modo === "ovni" || j.modo === "onda")) {
+        J.checkpoints.push({ j: clonar(j) });
+      }
+
+      // Giro del cubo y de la bola
+      if (j.modo === "cubo") {
+        if (j.suelo) {
+          let objetivo = Math.round(J.rot / (Math.PI / 2)) * (Math.PI / 2);
+          J.rot += (objetivo - J.rot) * 0.45;
+        } else {
+          J.rot += 7.4 / 60 * j.grav * (j.mini ? 1.25 : 1);
+        }
+      } else if (j.modo === "bola") {
+        J.rot += j.vel / 60 * 1.6 * j.grav;
+      } else if (j.modo === "nave" || j.modo === "onda") {
+        J.rot = -Math.atan2(j.vy, j.vel);
+      } else {
+        J.rot = 0;
+      }
+
+      // Estela y partículas
+      J.estela.push({ x: j.x + tamaño(j) / 2, y: j.y + tamaño(j) / 2 });
+      if (J.estela.length > 45) J.estela.shift();
+      let c1 = COLORES[datos.c1];
+      if (j.suelo && (j.modo === "cubo" || j.modo === "robot" || j.modo === "bola" || j.modo === "arana") && J.t % 3 === 0) {
+        particulas.push({ x: j.x, y: j.grav === 1 ? j.y + 0.05 : j.y + tamaño(j) - 0.05, vx: -1 - Math.random() * 2, vy: (Math.random() * 2) * j.grav,
+                          vida: 20, max: 20, color: c1, tam: 0.12 });
+      }
+      if ((j.modo === "nave" || j.modo === "ovni") && J.t % 2 === 0) {
+        particulas.push({ x: j.x, y: j.y + 0.4, vx: -4 - Math.random() * 3, vy: (Math.random() - 0.5) * 2,
+                          vida: 18, max: 18, color: Math.random() < 0.5 ? "#ffcc33" : "#ff6a00", tam: 0.18 });
+      }
+      actualizarParticulas();
+
+      // Colores del nivel (cambian suavecito)
+      let c = colorEn(j.x), f = hexARgb(c.fondo), s = hexARgb(c.suelo);
+      for (let k = 0; k < 3; k++) {
+        J.fondo[k] += (f[k] - J.fondo[k]) * 0.05;
+        J.suelo[k] += (s[k] - J.suelo[k]) * 0.05;
+      }
+
+      // Cámara
+      let B = tamBloque();
+      J.camX = j.x - visibles() * 0.3;
+      let objetivoY;
+      if (j.techo !== null) objetivoY = j.techo / 2 - 5.5;
+      else objetivoY = Math.max(-2.6, j.y - 5.5);
+      J.camY += (objetivoY - J.camY) * 0.08;
+    }
+
+    function morir(pct) {
+      let J = juego, j = J.j;
+      J.estado = "muerto";
+      J.t = 0;
+      detenerMusica();
+      sonidoMuerte();
+      explosion(j.x + 0.5, j.y + 0.5, COLORES[datos.c1], 26);
+      explosion(j.x + 0.5, j.y + 0.5, COLORES[datos.c2], 14);
+      let p = progresoDe(J.idx);
+      if (J.practica) p.practica = Math.max(p.practica, pct);
+      else p.normal = Math.max(p.normal, pct);
+      J.ultimoPct = pct;
+      guardar();
+    }
+
+    function ganar() {
+      let J = juego, j = J.j;
+      J.estado = "completado";
+      J.t = 0;
+      sonidoGanar();
+      let p = progresoDe(J.idx);
+      if (J.practica) {
+        p.practica = 100;
+      } else {
+        p.normal = 100;
+        p.completado = true;
+        p.monedas |= j.monedas;
+      }
+      guardar();
+    }
+
+    function explosion(x, y, color, n) {
+      for (let i = 0; i < n; i++) {
+        let a = Math.random() * Math.PI * 2, v = 2 + Math.random() * 8;
+        particulas.push({ x: x, y: y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, vida: 40, max: 40, color: color, tam: 0.12 + Math.random() * 0.2 });
+      }
+    }
+    function actualizarParticulas() {
+      for (let p of particulas) {
+        p.x += p.vx / 60;
+        p.y += p.vy / 60;
+        p.vx *= 0.96;
+        p.vy *= 0.96;
+        p.vida--;
+      }
+      particulas = particulas.filter(p => p.vida > 0);
+    }
+
+    // 9. DIBUJAR EL JUEGO
+    function sx(x) { return (x - juego.camX) * tamBloque(); }
+    function sy(y) { return PH - (y - juego.camY) * tamBloque(); }
+
+    function dibujarFondo(fondo, suelo, camX, camY, techo) {
+      let B = tamBloque(), p = pulso();
+      ctx.fillStyle = rgb(fondo, p * 12);
+      ctx.fillRect(0, 0, PW, PH);
+      let g = ctx.createLinearGradient(0, 0, 0, PH);
+      g.addColorStop(0, "rgba(255, 255, 255, 0.08)");
+      g.addColorStop(1, "rgba(0, 0, 0, 0.25)");
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, PW, PH);
+      // Cuadros grandes del fondo (se mueven más despacio)
+      let L = B * 4.5;
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.07)";
+      ctx.lineWidth = B * 0.08;
+      let ox = -((camX * B * 0.12) % L), oy = (camY * B * 0.08) % L;
+      for (let x = ox - L; x < PW + L; x += L) {
+        for (let y = oy - L; y < PH + L; y += L) {
+          ctx.strokeRect(x + B * 0.3, y + B * 0.3, L - B * 0.6, L - B * 0.6);
+        }
+      }
+      ctx.fillStyle = "rgba(0, 0, 0, 0.08)";
+      for (let x = ox - L; x < PW + L; x += L * 2) ctx.fillRect(x, 0, L, PH);
+    }
+
+    function dibujarSueloYTecho(suelo, camX, camY, techo) {
+      let B = tamBloque();
+      let piso = PH - (0 - camY) * B;
+      dibujarFranja(suelo, camX, piso, PH - piso + 2, false);
+      if (techo !== null && techo !== undefined) {
+        let arriba = PH - (techo - camY) * B;
+        dibujarFranja(suelo, camX, arriba, -arriba - 2, true);
+      }
+    }
+    function dibujarFranja(suelo, camX, y, alto, alReves) {
+      let B = tamBloque();
+      let y0 = alReves ? y + alto : y, h = Math.abs(alto);
+      if (h <= 0) return;
+      ctx.fillStyle = rgb(suelo);
+      ctx.fillRect(0, y0, PW, h);
+      ctx.strokeStyle = "rgba(0, 0, 0, 0.25)";
+      ctx.lineWidth = B * 0.05;
+      let L = B * 4, ox = -((camX * B) % L);
+      for (let x = ox; x < PW; x += L) {
+        for (let k = 0; k < 3; k++) {
+          let yy = alReves ? y - (k + 1) * L : y + k * L;
+          ctx.strokeRect(x, yy, L, L);
+        }
+      }
+      // Línea brillante de la orilla
+      let g = ctx.createLinearGradient(0, 0, PW, 0);
+      g.addColorStop(0, "rgba(255, 255, 255, 0)");
+      g.addColorStop(0.5, "rgba(255, 255, 255, 1)");
+      g.addColorStop(1, "rgba(255, 255, 255, 0)");
+      ctx.fillStyle = g;
+      ctx.fillRect(0, y - B * 0.03, PW, B * 0.06);
+    }
+
+    const COLOR_ORBE = { amarillo: "#ffe600", rosa: "#ff6bd6", rojo: "#ff3b3b", azul: "#39c6ff", verde: "#3dff6b", negro: "#222" };
+    const COLOR_PORTAL = { cubo: "#3dff6b", nave: "#ff4fd8", bola: "#ff6b2b", ovni: "#ffb000", onda: "#2bd5ff", robot: "#f2f2f2", arana: "#a050ff" };
+    const COLOR_VELOCIDAD = { lenta: "#ff9a2b", normal: "#2bb0ff", rapida: "#3dff6b", muyRapida: "#ff4fd8", extrema: "#ff2b2b" };
+    const FLECHAS_VELOCIDAD = { lenta: 1, normal: 2, rapida: 3, muyRapida: 4, extrema: 5 };
+
+    function dibujarObjeto(o, B, p) {
+      switch (o.tipo) {
+        case "bloque": {
+          let x = sx(o.x), y = sy(o.y1), w = o.w * B, h = o.h * B;
+          ctx.fillStyle = "rgba(0, 0, 0, 0.88)";
+          ctx.fillRect(x, y, w, h);
+          ctx.strokeStyle = "rgba(255, 255, 255, 0.16)";
+          ctx.lineWidth = B * 0.03;
+          ctx.beginPath();
+          for (let i = 1; i < o.w; i++) { ctx.moveTo(x + i * B, y); ctx.lineTo(x + i * B, y + h); }
+          for (let i = 1; i < o.h; i++) { ctx.moveTo(x, y + h - i * B); ctx.lineTo(x + w, y + h - i * B); }
+          ctx.stroke();
+          ctx.strokeStyle = "#fff";
+          ctx.lineWidth = B * 0.06;
+          ctx.strokeRect(x, y, w, h);
+          break;
+        }
+        case "pincho": {
+          let s = o.tam, c = sx(o.x + 0.5);
+          let base = o.dir === 1 ? sy(o.y) : sy(o.y + 1), punta = o.dir === 1 ? sy(o.y + s * 0.95) : sy(o.y + 1 - s * 0.95);
+          ctx.beginPath();
+          ctx.moveTo(c - s * B * 0.47, base);
+          ctx.lineTo(c, punta);
+          ctx.lineTo(c + s * B * 0.47, base);
+          ctx.closePath();
+          ctx.fillStyle = "#000";
+          ctx.fill();
+          ctx.strokeStyle = "#fff";
+          ctx.lineWidth = B * 0.06;
+          ctx.lineJoin = "round";
+          ctx.stroke();
+          break;
+        }
+        case "sierra": {
+          ctx.save();
+          ctx.translate(sx(o.x), sy(o.y));
+          ctx.rotate(cuadro * 0.12);
+          let r = o.r * B;
+          ctx.beginPath();
+          for (let i = 0; i < 24; i++) {
+            let a = i * Math.PI / 12, rr = i % 2 ? r : r * 0.82;
+            ctx.lineTo(Math.cos(a) * rr, Math.sin(a) * rr);
+          }
+          ctx.closePath();
+          ctx.fillStyle = "#000";
+          ctx.fill();
+          ctx.strokeStyle = "#fff";
+          ctx.lineWidth = B * 0.05;
+          ctx.stroke();
+          ctx.beginPath(); ctx.arc(0, 0, r * 0.45, 0, Math.PI * 2); ctx.stroke();
+          ctx.restore();
+          break;
+        }
+        case "orbe": {
+          let x = sx(o.x), y = sy(o.y), r = B * 0.36 * (1 + p * 0.12);
+          ctx.save();
+          ctx.translate(x, y);
+          ctx.globalAlpha = 0.35;
+          ctx.fillStyle = COLOR_ORBE[o.color];
+          ctx.beginPath(); ctx.arc(0, 0, r * 1.7, 0, Math.PI * 2); ctx.fill();
+          ctx.globalAlpha = 1;
+          ctx.rotate(cuadro * 0.05);
+          ctx.strokeStyle = o.color === "negro" ? "#fff" : COLOR_ORBE[o.color];
+          ctx.lineWidth = B * 0.06;
+          ctx.setLineDash([B * 0.18, B * 0.1]);
+          ctx.beginPath(); ctx.arc(0, 0, r * 1.45, 0, Math.PI * 2); ctx.stroke();
+          ctx.setLineDash([]);
+          let g = ctx.createRadialGradient(-r * 0.3, -r * 0.3, r * 0.1, 0, 0, r);
+          g.addColorStop(0, "#fff");
+          g.addColorStop(0.35, COLOR_ORBE[o.color]);
+          g.addColorStop(1, o.color === "negro" ? "#000" : COLOR_ORBE[o.color]);
+          ctx.fillStyle = g;
+          ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.fill();
+          ctx.strokeStyle = "#000";
+          ctx.lineWidth = B * 0.04;
+          ctx.stroke();
+          ctx.restore();
+          break;
+        }
+        case "pad": {
+          let x = sx(o.x + 0.5), y = sy(o.y);
+          ctx.fillStyle = COLOR_ORBE[o.color];
+          ctx.globalAlpha = 0.3 + p * 0.3;
+          ctx.fillRect(x - B * 0.4, y - B * 0.9, B * 0.8, B * 0.9);
+          ctx.globalAlpha = 1;
+          ctx.beginPath();
+          ctx.ellipse(x, y, B * 0.45, B * 0.22, 0, Math.PI, 0);
+          ctx.fill();
+          ctx.strokeStyle = "#000";
+          ctx.lineWidth = B * 0.04;
+          ctx.stroke();
+          break;
+        }
+        case "portal": {
+          let color = o.clase === "modo" ? COLOR_PORTAL[o.valor]
+                    : o.clase === "gravedad" ? (o.valor === 1 ? "#2bb0ff" : "#ffe12b")
+                    : o.clase === "tamaño" ? (o.valor ? "#ff4fd8" : "#3dff6b")
+                    : COLOR_VELOCIDAD[o.valor];
+          let x = sx(o.x), y = sy(o.yc);
+          if (o.clase === "velocidad") {
+            ctx.fillStyle = color;
+            ctx.strokeStyle = "#000";
+            ctx.lineWidth = B * 0.05;
+            let n = FLECHAS_VELOCIDAD[o.valor];
+            for (let i = 0; i < n; i++) {
+              let ax = x - (n - 1) * B * 0.2 + i * B * 0.4;
+              ctx.beginPath();
+              ctx.moveTo(ax - B * 0.3, y - B * 0.6); ctx.lineTo(ax + B * 0.15, y); ctx.lineTo(ax - B * 0.3, y + B * 0.6);
+              ctx.lineTo(ax - B * 0.1, y); ctx.closePath();
+              ctx.fill(); ctx.stroke();
+            }
+            break;
+          }
+          let alto = o.yc > 2 ? 2.2 : 1.6;
+          ctx.save();
+          ctx.globalAlpha = 0.25 + p * 0.2;
+          ctx.fillStyle = color;
+          ctx.beginPath(); ctx.ellipse(x, y, B * 0.7, B * alto * 1.1, 0, 0, Math.PI * 2); ctx.fill();
+          ctx.globalAlpha = 1;
+          ctx.strokeStyle = "#000";
+          ctx.lineWidth = B * 0.3;
+          ctx.beginPath(); ctx.ellipse(x, y, B * 0.38, B * alto, 0, 0, Math.PI * 2); ctx.stroke();
+          ctx.strokeStyle = color;
+          ctx.lineWidth = B * 0.2;
+          ctx.stroke();
+          ctx.strokeStyle = "rgba(255, 255, 255, 0.7)";
+          ctx.lineWidth = B * 0.05;
+          ctx.beginPath(); ctx.ellipse(x, y, B * 0.25, B * (alto - 0.15), 0, 0, Math.PI * 2); ctx.stroke();
+          ctx.restore();
+          break;
+        }
+        case "moneda": {
+          let tomada = juego.j.monedas & (1 << o.id);
+          if (tomada) break;
+          let ya = progresoDe(juego.idx).monedas & (1 << o.id);
+          let x = sx(o.x), y = sy(o.y), r = B * 0.42;
+          ctx.save();
+          ctx.translate(x, y);
+          ctx.scale(Math.cos(cuadro * 0.06), 1);
+          ctx.globalAlpha = ya ? 0.45 : 1;
+          ctx.fillStyle = "#ffd700";
+          ctx.strokeStyle = "#000";
+          ctx.lineWidth = B * 0.05;
+          ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+          ctx.strokeStyle = "#b8860b";
+          ctx.beginPath(); ctx.arc(0, 0, r * 0.7, 0, Math.PI * 2); ctx.stroke();
+          ctx.fillStyle = "#fff8b0";
+          ctx.fillRect(-r * 0.15, -r * 0.45, r * 0.3, r * 0.9);
+          ctx.restore();
+          break;
+        }
+      }
+    }
+
+    function dibujarJugador(j, B) {
+      let t = tamaño(j), c1 = COLORES[datos.c1], c2 = COLORES[datos.c2];
+      let x = sx(j.x + t / 2), y = sy(j.y + t / 2);
+      // Estela de la onda
+      if (j.modo === "onda" && juego.estela.length > 1) {
+        ctx.beginPath();
+        juego.estela.forEach((e, i) => i ? ctx.lineTo(sx(e.x), sy(e.y)) : ctx.moveTo(sx(e.x), sy(e.y)));
+        ctx.strokeStyle = c1;
+        ctx.lineWidth = B * 0.3 * t;
+        ctx.lineJoin = "miter";
+        ctx.stroke();
+        ctx.strokeStyle = "#fff";
+        ctx.lineWidth = B * 0.1 * t;
+        ctx.stroke();
+      }
+      ctx.save();
+      ctx.translate(x, y);
+      let dibuja = j.modo === "onda" ? t * 1.6 : t;
+      ctx.scale(B * dibuja, B * dibuja);
+      if (j.grav === -1 && j.modo !== "cubo" && j.modo !== "bola" && j.modo !== "onda") ctx.scale(1, -1);
+      if (j.modo === "cubo" || j.modo === "bola") ctx.rotate(juego.rot);
+      if (j.modo === "nave") ctx.rotate(juego.rot * j.grav);
+      if (j.modo === "onda") ctx.rotate(juego.rot);
+      dibujarIcono(ctx, j.modo, datos.icono[j.modo], c1, c2, cuadro * 0.4);
+      ctx.restore();
+    }
+
+    function dibujarJuego() {
+      let J = juego, j = J.j, B = tamBloque(), p = pulso();
+      dibujarFondo(J.fondo, J.suelo, J.camX, J.camY);
+
+      // Texto del intento (se queda en el mundo)
+      let tx = sx(J.inicioIntento + 6), ty = sy(5.5);
+      if (tx > -PW) textoGD("Intento " + J.intentos, tx, ty, B * 0.7, "#fff", "left");
+
+      // Objetos visibles
+      let desde = J.camX - 3, hasta = J.camX + visibles() + 3;
+      for (let o of J.L.dibujables) {
+        if (o.x < desde - 10) continue;
+        if (o.x > hasta) break;
+        dibujarObjeto(o, B, p);
+      }
+      // Meta
+      let mx = sx(J.L.largo);
+      if (mx < PW + B) {
+        let g = ctx.createLinearGradient(mx, 0, mx + B * 3, 0);
+        g.addColorStop(0, "rgba(255, 255, 255, 0.9)");
+        g.addColorStop(1, "rgba(255, 255, 255, 0)");
+        ctx.fillStyle = g;
+        ctx.fillRect(mx, 0, B * 3, PH);
+      }
+      // Puntos de control de práctica
+      for (let cp of J.checkpoints) {
+        let x = sx(cp.j.x + 0.5), y = sy(cp.j.y + 0.5);
+        if (x < -B || x > PW + B) continue;
+        ctx.save(); ctx.translate(x, y); ctx.rotate(Math.PI / 4);
+        ctx.fillStyle = "#3dff6b"; ctx.strokeStyle = "#000"; ctx.lineWidth = B * 0.05;
+        ctx.fillRect(-B * 0.22, -B * 0.22, B * 0.44, B * 0.44); ctx.strokeRect(-B * 0.22, -B * 0.22, B * 0.44, B * 0.44);
+        ctx.restore();
+      }
+
+      for (let q of particulas) {
+        ctx.globalAlpha = q.vida / q.max;
+        ctx.fillStyle = q.color;
+        let s = q.tam * B;
+        ctx.fillRect(sx(q.x) - s / 2, sy(q.y) - s / 2, s, s);
+      }
+      ctx.globalAlpha = 1;
+      if (J.estado !== "muerto") dibujarJugador(j, B);
+      else if (J.t < 12) {
+        ctx.strokeStyle = "#fff";
+        ctx.lineWidth = B * 0.15 * (1 - J.t / 12);
+        ctx.beginPath(); ctx.arc(sx(j.x + 0.5), sy(j.y + 0.5), B * (0.5 + J.t * 0.25), 0, Math.PI * 2); ctx.stroke();
+      }
+
+      dibujarSueloYTecho(J.suelo, J.camX, J.camY, j.techo);
+
+      // Barra de progreso
+      let pct = Math.min(100, Math.max(0, j.x / J.L.largo * 100));
+      let bw = PW * 0.38, bh = PH * 0.022, bx = PW / 2 - bw / 2, by = PH * 0.02;
+      ctx.fillStyle = "rgba(0, 0, 0, 0.35)";
+      ctx.fillRect(bx, by, bw, bh);
+      ctx.fillStyle = J.practica ? "#3dff6b" : COLORES[datos.c1];
+      ctx.fillRect(bx, by, bw * pct / 100, bh);
+      ctx.strokeStyle = "#fff";
+      ctx.lineWidth = Math.max(1, PH * 0.003);
+      ctx.strokeRect(bx, by, bw, bh);
+      textoGD(Math.floor(pct) + "%", bx + bw + PH * 0.02, by + bh / 2, PH * 0.03, "#fff", "left");
+      if (J.practica) textoGD("PRÁCTICA  (Z: poner punto · X: quitar)", PW / 2, by + bh + PH * 0.035, PH * 0.022, "#3dff6b", "center");
+
+      // Monedas tomadas
+      for (let i = 0; i < J.L.monedas; i++) {
+        let tomada = j.monedas & (1 << i);
+        ctx.fillStyle = tomada ? "#ffd700" : "rgba(255, 255, 255, 0.18)";
+        ctx.strokeStyle = "#000";
+        ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.arc(PW * 0.035 + i * PH * 0.045, PH * 0.04, PH * 0.016, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      }
+
+      // Botón de pausa
+      boton(PW - PH * 0.08, PH * 0.015, PH * 0.065, PH * 0.065, () => pausar(), (x, y, w, h) => {
+        ctx.fillStyle = "rgba(255, 255, 255, 0.85)";
+        ctx.fillRect(x + w * 0.28, y + h * 0.22, w * 0.14, h * 0.56);
+        ctx.fillRect(x + w * 0.58, y + h * 0.22, w * 0.14, h * 0.56);
+      });
+
+      if (J.estado === "muerto" && J.t > 10 && J.ultimoPct !== undefined) {
+        textoGD(J.ultimoPct + "%", PW / 2, PH * 0.45, PH * 0.1, "#fff", "center");
+      }
+      if (J.estado === "completado") dibujarCompletado();
+      if (J.estado === "pausa") dibujarPausa();
+    }
+
+    // 10. TEXTOS Y BOTONES
+    function textoGD(s, x, y, tam, color, alinear) {
+      ctx.font = Math.round(tam) + "px " + FUENTE;
+      ctx.textAlign = alinear || "center";
+      ctx.textBaseline = "middle";
+      ctx.lineJoin = "round";
+      ctx.lineWidth = tam * 0.16;
+      ctx.strokeStyle = "#000";
+      ctx.strokeText(s, x, y);
+      ctx.fillStyle = color;
+      ctx.fillText(s, x, y);
+    }
+    let botones = [];
+    function boton(x, y, w, h, accion, dibujo) {
+      botones.push({ x: x, y: y, w: w, h: h, accion: accion });
+      if (dibujo) dibujo(x, y, w, h);
+    }
+    function botonTexto(texto, x, y, w, h, color, accion) {
+      boton(x, y, w, h, accion, () => {
+        ctx.fillStyle = color;
+        redondeado(x, y, w, h, h * 0.25);
+        ctx.fill();
+        ctx.strokeStyle = "#000";
+        ctx.lineWidth = h * 0.06;
+        ctx.stroke();
+        ctx.fillStyle = "rgba(255, 255, 255, 0.25)";
+        redondeado(x + h * 0.08, y + h * 0.08, w - h * 0.16, h * 0.32, h * 0.15);
+        ctx.fill();
+        textoGD(texto, x + w / 2, y + h / 2, h * 0.42, "#fff", "center");
+      });
+    }
+    function redondeado(x, y, w, h, r) {
+      ctx.beginPath();
+      ctx.moveTo(x + r, y);
+      ctx.arcTo(x + w, y, x + w, y + h, r);
+      ctx.arcTo(x + w, y + h, x, y + h, r);
+      ctx.arcTo(x, y + h, x, y, r);
+      ctx.arcTo(x, y, x + w, y, r);
+      ctx.closePath();
+    }
+    function panel(x, y, w, h) {
+      ctx.fillStyle = "rgba(10, 20, 60, 0.88)";
+      redondeado(x, y, w, h, PH * 0.03);
+      ctx.fill();
+      ctx.strokeStyle = "#000";
+      ctx.lineWidth = PH * 0.006;
+      ctx.stroke();
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.25)";
+      ctx.lineWidth = PH * 0.003;
+      redondeado(x + PH * 0.01, y + PH * 0.01, w - PH * 0.02, h - PH * 0.02, PH * 0.025);
+      ctx.stroke();
+    }
+
+    function pausar() {
+      if (juego && juego.estado === "jugando") {
+        juego.estado = "pausa";
+        if (audio) audio.suspend();
+      }
+    }
+    function continuar() {
+      if (juego && juego.estado === "pausa") {
+        juego.estado = "jugando";
+        juego.j.sosteniaAntes = true;
+        if (audio) audio.resume();
+      }
+    }
+    function salirAlMenu() {
+      if (audio) audio.resume();
+      detenerMusica();
+      juego = null;
+      pantalla = "niveles";
+      empezarMusicaMenu();
+    }
+    function reiniciar() {
+      if (audio) audio.resume();
+      juego.checkpoints = [];
+      juego.j = nuevoJugador();
+      juego.estado = "jugando";
+      let practica = juego.practica;
+      juego.practica = false;
+      nuevoIntento();
+      juego.practica = practica;
+    }
+    function alternarPractica() {
+      juego.practica = !juego.practica;
+      juego.checkpoints = [];
+      if (audio) audio.resume();
+      juego.estado = "jugando";
+      nuevoIntento();
+    }
+
+    function dibujarPausa() {
+      ctx.fillStyle = "rgba(0, 0, 0, 0.5)";
+      ctx.fillRect(0, 0, PW, PH);
+      let w = Math.min(PW * 0.8, PH * 1.1), h = PH * 0.62, x = PW / 2 - w / 2, y = PH * 0.18;
+      panel(x, y, w, h);
+      textoGD(juego.def.nombre, PW / 2, y + h * 0.13, PH * 0.06, "#fff", "center");
+      let p = progresoDe(juego.idx);
+      barraProgreso("Normal", p.normal, x + w * 0.1, y + h * 0.27, w * 0.8, PH * 0.035, "#3dff6b");
+      barraProgreso("Práctica", p.practica, x + w * 0.1, y + h * 0.42, w * 0.8, PH * 0.035, "#2bd5ff");
+      let bw = w * 0.38, bh = PH * 0.08;
+      botonTexto("▶ Seguir", x + w * 0.08, y + h * 0.58, bw, bh, "#3dbf3d", continuar);
+      botonTexto("↺ Reiniciar", x + w * 0.54, y + h * 0.58, bw, bh, "#2b8aff", reiniciar);
+      botonTexto(juego.practica ? "Salir práctica" : "◆ Práctica", x + w * 0.08, y + h * 0.78, bw, bh, "#2bbf9a", alternarPractica);
+      botonTexto("✖ Menú", x + w * 0.54, y + h * 0.78, bw, bh, "#d63a3a", salirAlMenu);
+    }
+
+    function barraProgreso(nombre, pct, x, y, w, h, color) {
+      textoGD(nombre, x + w / 2, y - h * 0.6, h * 0.75, "#fff", "center");
+      ctx.fillStyle = "rgba(0, 0, 0, 0.5)";
+      redondeado(x, y, w, h, h / 2);
+      ctx.fill();
+      if (pct > 0) {
+        ctx.fillStyle = color;
+        redondeado(x, y, Math.max(h, w * pct / 100), h, h / 2);
+        ctx.fill();
+      }
+      ctx.strokeStyle = "#000";
+      ctx.lineWidth = h * 0.12;
+      redondeado(x, y, w, h, h / 2);
+      ctx.stroke();
+      textoGD(pct + "%", x + w / 2, y + h / 2, h * 0.7, "#fff", "center");
+    }
+
+    function dibujarCompletado() {
+      let J = juego;
+      let aparece = Math.min(1, J.t / 25);
+      textoGD(J.practica ? "¡PRÁCTICA COMPLETADA!" : "¡NIVEL COMPLETADO!", PW / 2, PH * 0.2, PH * 0.09 * (0.6 + aparece * 0.4), "#ffd700", "center");
+      if (J.t < 90) return;
+      let w = Math.min(PW * 0.8, PH * 1.0), h = PH * 0.5, x = PW / 2 - w / 2, y = PH * 0.32;
+      panel(x, y, w, h);
+      let segundos = Math.floor(J.tiempo / 60);
+      textoGD("Intentos: " + J.intentos, PW / 2, y + h * 0.15, PH * 0.042, "#fff", "center");
+      textoGD("Saltos: " + J.j.saltos + "    Tiempo: " + Math.floor(segundos / 60) + ":" + String(segundos % 60).padStart(2, "0"), PW / 2, y + h * 0.3, PH * 0.034, "#fff", "center");
+      if (!J.practica) {
+        textoGD("★ " + J.def.estrellas + " estrellas", PW / 2, y + h * 0.45, PH * 0.045, "#ffd700", "center");
+        for (let i = 0; i < J.L.monedas; i++) {
+          let tomada = J.j.monedas & (1 << i);
+          ctx.fillStyle = tomada ? "#ffd700" : "rgba(255, 255, 255, 0.15)";
+          ctx.strokeStyle = "#000";
+          ctx.lineWidth = PH * 0.005;
+          ctx.beginPath(); ctx.arc(PW / 2 + (i - 1) * PH * 0.08, y + h * 0.6, PH * 0.028, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+        }
+      }
+      let bw = w * 0.38, bh = PH * 0.08;
+      botonTexto("↺ Otra vez", x + w * 0.08, y + h * 0.74, bw, bh, "#2b8aff", reiniciar);
+      botonTexto("✔ Menú", x + w * 0.54, y + h * 0.74, bw, bh, "#3dbf3d", salirAlMenu);
+    }
+
+    // 11. MENÚ PRINCIPAL
+    let menuFondo = [40, 90, 255];
+    function empezarMusicaMenu() {
+      if (audio && !cancion) empezarMusica(MUSICA_MENU);
+    }
+    function dibujarFondoMenu(camX) {
+      let h = (cuadro * 0.2) % 360;
+      let c = hslARgb(h, 0.75, 0.45);
+      for (let k = 0; k < 3; k++) menuFondo[k] += (c[k] - menuFondo[k]) * 0.02;
+      dibujarFondo(menuFondo, menuFondo.map(v => v * 0.75), camX, -2.6);
+    }
+    function hslARgb(h, s, l) {
+      let a = s * Math.min(l, 1 - l);
+      let f = n => { let k = (n + h / 30) % 12; return 255 * (l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1))); };
+      return [f(0), f(8), f(4)];
+    }
+
+    function dibujarMenu() {
+      let camX = cuadro * 10.4 / 60;
+      juego = null;
+      dibujarFondoMenu(camX);
+      let B = tamBloque();
+      // Un cubo saltando pinchitos de adorno
+      let ciclo = (cuadro % 120) / 120;
+      let salto = ciclo > 0.5 && ciclo < 0.86 ? Math.sin((ciclo - 0.5) / 0.36 * Math.PI) * 2.1 : 0;
+      let suelo = PH - 2.6 * B;
+      for (let i = 0; i < 6; i++) {
+        let px = ((i * 9 - camX) % 54 + 54) % 54;
+        let x = PW - px * B;
+        ctx.beginPath(); ctx.moveTo(x - B * 0.47, suelo); ctx.lineTo(x, suelo - B * 0.95); ctx.lineTo(x + B * 0.47, suelo); ctx.closePath();
+        ctx.fillStyle = "#000"; ctx.fill(); ctx.strokeStyle = "#fff"; ctx.lineWidth = B * 0.06; ctx.stroke();
+      }
+      ctx.save();
+      ctx.translate(PW * 0.2, suelo - B * 0.5 - salto * B);
+      ctx.scale(B, B);
+      ctx.rotate(salto > 0 ? (ciclo - 0.5) / 0.36 * Math.PI : 0);
+      dibujarCubo(ctx, datos.icono.cubo, COLORES[datos.c1], COLORES[datos.c2]);
+      ctx.restore();
+      dibujarSueloYTecho(menuFondo.map(v => v * 0.7), camX, -2.6, null);
+
+      textoGD("GEO DASH", PW / 2, PH * 0.17, Math.min(PH * 0.15, PW * 0.12), "#ffe600", "center");
+      // Botones grandes
+      let r = PH * 0.13;
+      boton(PW / 2 - r, PH * 0.47 - r, r * 2, r * 2, () => { pantalla = "niveles"; }, () => {
+        let p = 1 + pulso() * 0.04;
+        ctx.save(); ctx.translate(PW / 2, PH * 0.47); ctx.scale(p, p);
+        ctx.fillStyle = "#7dff00";
+        ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = "#000"; ctx.lineWidth = r * 0.1; ctx.stroke();
+        ctx.fillStyle = "#3dbf00";
+        ctx.beginPath(); ctx.arc(0, 0, r * 0.78, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = "#fff";
+        ctx.beginPath(); ctx.moveTo(-r * 0.25, -r * 0.4); ctx.lineTo(r * 0.45, 0); ctx.lineTo(-r * 0.25, r * 0.4); ctx.closePath(); ctx.fill();
+        ctx.lineWidth = r * 0.07; ctx.stroke();
+        ctx.restore();
+      });
+      let s = PH * 0.15;
+      boton(PW / 2 - r * 1.3 - s * 1.2, PH * 0.47 - s / 2, s, s, () => { pantalla = "iconos"; }, (x, y, w, h) => {
+        ctx.fillStyle = "#ff9a2b"; redondeado(x, y, w, h, w * 0.18); ctx.fill();
+        ctx.strokeStyle = "#000"; ctx.lineWidth = w * 0.06; ctx.stroke();
+        ctx.save(); ctx.translate(x + w / 2, y + h / 2); ctx.scale(w * 0.5, w * 0.5);
+        dibujarCubo(ctx, datos.icono.cubo, COLORES[datos.c1], COLORES[datos.c2]);
+        ctx.restore();
+      });
+      boton(PW / 2 + r * 1.3 + s * 0.2, PH * 0.47 - s / 2, s, s, () => { datos.musica = !datos.musica; guardar(); if (!datos.musica) detenerMusica(); else empezarMusicaMenu(); }, (x, y, w, h) => {
+        ctx.fillStyle = "#2b8aff"; redondeado(x, y, w, h, w * 0.18); ctx.fill();
+        ctx.strokeStyle = "#000"; ctx.lineWidth = w * 0.06; ctx.stroke();
+        textoGD(datos.musica ? "♪" : "✕", x + w / 2, y + h / 2, w * 0.55, "#fff", "center");
+      });
+      textoGD("Personajes", PW / 2 - r * 1.3 - s * 0.7, PH * 0.47 + s * 0.72, PH * 0.028, "#fff", "center");
+      textoGD("Música", PW / 2 + r * 1.3 + s * 0.7, PH * 0.47 + s * 0.72, PH * 0.028, "#fff", "center");
+      let estrellas = 0, monedas = 0;
+      NIVELES.forEach((n, i) => {
+        let p = progresoDe(i);
+        if (p.completado) estrellas += n.estrellas;
+        for (let k = 0; k < 3; k++) if (p.monedas & (1 << k)) monedas++;
+      });
+      textoGD("★ " + estrellas + "   ● " + monedas, PW - PH * 0.03, PH * 0.05, PH * 0.04, "#ffd700", "right");
+      textoGD("Espacio / clic / flecha arriba para saltar", PW / 2, PH * 0.69, PH * 0.028, "#fff", "center");
+    }
+
+    // 12. ELEGIR NIVEL
+    function dibujarCaraDificultad(x, y, r, dif) {
+      let d = DIFICULTADES[dif];
+      ctx.fillStyle = d.color;
+      ctx.strokeStyle = "#000";
+      ctx.lineWidth = r * 0.12;
+      ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      if (dif === "demonio") {
+        ctx.fillStyle = "#000";
+        ctx.beginPath(); ctx.moveTo(x - r * 0.9, y - r * 0.5); ctx.lineTo(x - r * 1.2, y - r * 1.4); ctx.lineTo(x - r * 0.4, y - r * 0.85); ctx.fill();
+        ctx.beginPath(); ctx.moveTo(x + r * 0.9, y - r * 0.5); ctx.lineTo(x + r * 1.2, y - r * 1.4); ctx.lineTo(x + r * 0.4, y - r * 0.85); ctx.fill();
+      }
+      ctx.fillStyle = "#000";
+      let enojo = ["dificil", "masDificil", "insano", "demonio"].includes(dif);
+      for (let s of [-1, 1]) {
+        ctx.beginPath();
+        if (enojo) { ctx.moveTo(x + s * r * 0.15, y - r * 0.15); ctx.lineTo(x + s * r * 0.6, y - r * 0.4); ctx.lineTo(x + s * r * 0.55, y - r * 0.05); }
+        else ctx.arc(x + s * r * 0.35, y - r * 0.2, r * 0.13, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.lineWidth = r * 0.12;
+      ctx.beginPath();
+      if (enojo) ctx.arc(x, y + r * 0.6, r * 0.35, 1.15 * Math.PI, 1.85 * Math.PI);
+      else ctx.arc(x, y + r * 0.1, r * 0.4, 0.15 * Math.PI, 0.85 * Math.PI);
+      ctx.stroke();
+    }
+
+    function dibujarNiveles() {
+      let def = NIVELES[nivelElegido], c = hexARgb(def.colores[0][0]);
+      for (let k = 0; k < 3; k++) menuFondo[k] += (c[k] - menuFondo[k]) * 0.08;
+      dibujarFondo(menuFondo, menuFondo.map(v => v * 0.75), cuadro * 0.05, -2.6);
+      dibujarSueloYTecho(menuFondo.map(v => v * 0.7), cuadro * 0.05, -2.6, null);
+      let w = Math.min(PW * 0.62, PH * 1.05), h = PH * 0.3, x = PW / 2 - w / 2, y = PH * 0.16;
+      boton(x, y, w, h, () => jugarNivel(nivelElegido), () => {
+        ctx.fillStyle = "rgba(0, 0, 0, 0.35)";
+        redondeado(x, y, w, h, PH * 0.03);
+        ctx.fill();
+        ctx.strokeStyle = "rgba(0, 0, 0, 0.6)";
+        ctx.lineWidth = PH * 0.006;
+        ctx.stroke();
+        dibujarCaraDificultad(x + h * 0.4, y + h * 0.45, h * 0.24, def.dificultad);
+        textoGD(DIFICULTADES[def.dificultad].nombre, x + h * 0.4, y + h * 0.84, h * 0.1, "#fff", "center");
+        textoGD(def.nombre, x + w * 0.6, y + h * 0.4, Math.min(h * 0.22, w * 0.07), "#fff", "center");
+        textoGD("★ " + def.estrellas, x + w * 0.6, y + h * 0.72, h * 0.13, "#ffd700", "center");
+        let p = progresoDe(nivelElegido);
+        for (let i = 0; i < 3; i++) {
+          ctx.fillStyle = p.monedas & (1 << i) ? "#ffd700" : "rgba(255, 255, 255, 0.15)";
+          ctx.strokeStyle = "#000";
+          ctx.lineWidth = PH * 0.004;
+          ctx.beginPath(); ctx.arc(x + w * 0.88 + (i - 1) * h * 0.13, y + h * 0.72, h * 0.05, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+        }
+        if (p.completado) textoGD("✔", x + w - h * 0.15, y + h * 0.18, h * 0.16, "#3dff6b", "center");
+      });
+      let p = progresoDe(nivelElegido);
+      barraProgreso("Modo normal", p.normal, x, y + h + PH * 0.08, w, PH * 0.04, "#3dff6b");
+      barraProgreso("Modo práctica", p.practica, x, y + h + PH * 0.19, w, PH * 0.04, "#2bd5ff");
+      textoGD("Intentos: " + p.intentos, PW / 2, y + h + PH * 0.29, PH * 0.028, "#fff", "center");
+      let a = PH * 0.09;
+      boton(x - a * 1.6, y + h / 2 - a / 2, a, a, () => cambiarNivel(-1), (bx, by, bw, bh) => flecha(bx, by, bw, bh, -1));
+      boton(x + w + a * 0.6, y + h / 2 - a / 2, a, a, () => cambiarNivel(1), (bx, by, bw, bh) => flecha(bx, by, bw, bh, 1));
+      for (let i = 0; i < NIVELES.length; i++) {
+        ctx.fillStyle = i === nivelElegido ? "#fff" : "rgba(255, 255, 255, 0.35)";
+        ctx.beginPath(); ctx.arc(PW / 2 + (i - (NIVELES.length - 1) / 2) * PH * 0.03, PH * 0.93, PH * 0.008, 0, Math.PI * 2); ctx.fill();
+      }
+      botonAtras(() => { pantalla = "menu"; });
+      textoGD("← → para elegir · Enter para jugar", PW / 2, PH * 0.08, PH * 0.026, "#fff", "center");
+    }
+    function cambiarNivel(d) {
+      nivelElegido = (nivelElegido + d + NIVELES.length) % NIVELES.length;
+    }
+    function flecha(x, y, w, h, dir) {
+      ctx.fillStyle = "#7dff00";
+      ctx.strokeStyle = "#000";
+      ctx.lineWidth = w * 0.08;
+      ctx.beginPath();
+      if (dir > 0) { ctx.moveTo(x + w * 0.2, y); ctx.lineTo(x + w, y + h / 2); ctx.lineTo(x + w * 0.2, y + h); }
+      else { ctx.moveTo(x + w * 0.8, y); ctx.lineTo(x, y + h / 2); ctx.lineTo(x + w * 0.8, y + h); }
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+    }
+    function botonAtras(accion) {
+      let s = PH * 0.08;
+      boton(PH * 0.025, PH * 0.025, s, s, accion, (x, y, w, h) => {
+        ctx.fillStyle = "#3dbf3d";
+        ctx.beginPath(); ctx.arc(x + w / 2, y + h / 2, w / 2, 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = "#000"; ctx.lineWidth = w * 0.07; ctx.stroke();
+        ctx.fillStyle = "#fff";
+        ctx.beginPath(); ctx.moveTo(x + w * 0.62, y + h * 0.25); ctx.lineTo(x + w * 0.3, y + h * 0.5); ctx.lineTo(x + w * 0.62, y + h * 0.75); ctx.closePath(); ctx.fill();
+      });
+    }
+
+    // 13. PERSONAJES (elegir icono y colores)
+    function dibujarIconos() {
+      dibujarFondo([60, 60, 70], [40, 40, 50], cuadro * 0.03, -2.6);
+      textoGD("Personajes", PW / 2, PH * 0.06, PH * 0.06, "#fff", "center");
+      botonAtras(() => { pantalla = "menu"; });
+      let c1 = COLORES[datos.c1], c2 = COLORES[datos.c2];
+      // Vista previa de todos los modos
+      let ancho = Math.min(PW * 0.9, PH * 1.3), paso = ancho / MODOS.length, x0 = PW / 2 - ancho / 2;
+      MODOS.forEach((m, i) => {
+        let x = x0 + paso * (i + 0.5), y = PH * 0.17, s = PH * 0.075;
+        boton(x - paso / 2 + 4, y - s * 0.9, paso - 8, s * 1.8, () => { tabIconos = m; }, () => {
+          ctx.fillStyle = m === tabIconos ? "rgba(255, 255, 255, 0.25)" : "rgba(0, 0, 0, 0.25)";
+          redondeado(x - paso / 2 + 4, y - s * 0.9, paso - 8, s * 1.8, s * 0.2);
+          ctx.fill();
+          ctx.save(); ctx.translate(x, y - s * 0.12); ctx.scale(s * 0.8, s * 0.8);
+          dibujarIcono(ctx, m, datos.icono[m], c1, c2, cuadro * 0.2);
+          ctx.restore();
+          textoGD(NOMBRE_MODO[m], x, y + s * 0.62, s * 0.24, "#fff", "center");
+        });
+      });
+      // Cuadrícula de iconos del modo elegido
+      let n = CANTIDAD_ICONOS[tabIconos], cols = 10, filas = Math.ceil(n / cols);
+      let celda = Math.min(PW * 0.85 / cols, PH * 0.36 / Math.max(4, filas));
+      let gx = PW / 2 - cols * celda / 2, gy = PH * 0.29;
+      ctx.fillStyle = "rgba(0, 0, 0, 0.3)";
+      redondeado(gx - celda * 0.2, gy - celda * 0.2, cols * celda + celda * 0.4, filas * celda + celda * 0.4, celda * 0.2);
+      ctx.fill();
+      for (let i = 0; i < n; i++) {
+        let x = gx + (i % cols) * celda, y = gy + Math.floor(i / cols) * celda;
+        boton(x, y, celda, celda, () => { datos.icono[tabIconos] = i; guardar(); }, () => {
+          if (datos.icono[tabIconos] === i) {
+            ctx.strokeStyle = "#7dff00";
+            ctx.lineWidth = celda * 0.07;
+            ctx.strokeRect(x + celda * 0.05, y + celda * 0.05, celda * 0.9, celda * 0.9);
+          }
+          ctx.save(); ctx.translate(x + celda / 2, y + celda / 2); ctx.scale(celda * 0.55, celda * 0.55);
+          dibujarIcono(ctx, tabIconos, i, "#c8c8c8", "#ffffff", 0);
+          ctx.restore();
+        });
+      }
+      // Colores
+      let cy = gy + filas * celda + PH * 0.06;
+      let cs = Math.min(PW * 0.85 / 24, PH * 0.05);
+      ["c1", "c2"].forEach((cual, fila) => {
+        let y = cy + fila * cs * 1.9;
+        textoGD(fila === 0 ? "Color 1" : "Color 2", PW / 2, y - cs * 0.5, cs * 0.5, "#fff", "center");
+        COLORES.forEach((col, i) => {
+          let x = PW / 2 - COLORES.length * cs / 2 + i * cs;
+          boton(x, y, cs, cs, () => { datos[cual] = i; guardar(); }, () => {
+            ctx.fillStyle = col;
+            ctx.fillRect(x + cs * 0.08, y + cs * 0.08, cs * 0.84, cs * 0.84);
+            ctx.strokeStyle = datos[cual] === i ? "#fff" : "#000";
+            ctx.lineWidth = datos[cual] === i ? cs * 0.14 : cs * 0.05;
+            ctx.strokeRect(x + cs * 0.08, y + cs * 0.08, cs * 0.84, cs * 0.84);
+          });
+        });
+      });
+      let total = Object.values(CANTIDAD_ICONOS).reduce((a, b) => a + b, 0);
+      textoGD(total + " personajes · " + COLORES.length + " colores", PW / 2, PH * 0.96, PH * 0.025, "#ccc", "center");
+    }
+
+    // 14. CONTROLES
+    function presionar() {
+      iniciarAudio();
+      if (pantalla === "juego") {
+        if (juego.estado === "completado" && juego.t > 90) return;
+        sostiene = true;
+      }
+    }
+    function soltar() {
+      sostiene = false;
+    }
+    document.addEventListener("keydown", function (e) {
+      if (["Space", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Tab"].includes(e.code)) e.preventDefault();
+      if (e.repeat) return;
+      iniciarAudio();
+      if (pantalla === "juego") {
+        if (e.code === "Space" || e.code === "ArrowUp" || e.code === "KeyW") presionar();
+        if (e.code === "Escape" || e.code === "KeyP") { if (juego.estado === "pausa") continuar(); else pausar(); }
+        if (e.code === "KeyR" && juego.estado !== "completado") reiniciar();
+        if (juego.estado === "completado" && juego.t > 90) {
+          if (e.code === "Enter") reiniciar();
+          if (e.code === "Escape") salirAlMenu();
+        }
+        if (juego.practica && juego.estado === "jugando") {
+          if (e.code === "KeyZ") juego.checkpoints.push({ j: clonar(juego.j) });
+          if (e.code === "KeyX") juego.checkpoints.pop();
+        }
+      } else if (pantalla === "menu") {
+        if (e.code === "Enter" || e.code === "Space") pantalla = "niveles";
+        empezarMusicaMenu();
+      } else if (pantalla === "niveles") {
+        if (e.code === "ArrowLeft") cambiarNivel(-1);
+        if (e.code === "ArrowRight") cambiarNivel(1);
+        if (e.code === "Enter" || e.code === "Space") jugarNivel(nivelElegido);
+        if (e.code === "Escape") pantalla = "menu";
+      } else if (pantalla === "iconos") {
+        if (e.code === "Escape") pantalla = "menu";
+      }
+    });
+    document.addEventListener("keyup", function (e) {
+      if (e.code === "Space" || e.code === "ArrowUp" || e.code === "KeyW") soltar();
+    });
+    function clic(x, y) {
+      iniciarAudio();
+      for (let i = botones.length - 1; i >= 0; i--) {
+        let b = botones[i];
+        if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) { b.accion(); return true; }
+      }
+      return false;
+    }
+    canvas.addEventListener("mousedown", function (e) {
+      if (!clic(e.clientX, e.clientY)) presionar();
+      if (pantalla !== "juego") empezarMusicaMenu();
+    });
+    window.addEventListener("mouseup", soltar);
+    canvas.addEventListener("touchstart", function (e) {
+      e.preventDefault();
+      let t = e.changedTouches[0];
+      if (!clic(t.clientX, t.clientY)) presionar();
+    }, { passive: false });
+    canvas.addEventListener("touchend", function (e) { e.preventDefault(); if (e.touches.length === 0) soltar(); }, { passive: false });
+
+    // 15. EL BUCLE (60 pasos por segundo, siempre igual)
+    function paso() {
+      cuadro++;
+      if (pantalla === "juego" && juego) actualizarJuego();
+      programarMusica();
+    }
+    function dibujar() {
+      botones = [];
+      ctx.setTransform(RES, 0, 0, RES, 0, 0);
+      if (pantalla === "juego" && juego) dibujarJuego();
+      else if (pantalla === "niveles") dibujarNiveles();
+      else if (pantalla === "iconos") dibujarIconos();
+      else dibujarMenu();
+    }
+    let tiempoAnterior = performance.now(), acumulado = 0;
+    function bucle(ahora) {
+      acumulado += Math.min(100, ahora - tiempoAnterior);
+      tiempoAnterior = ahora;
+      while (acumulado >= 1000 / 60) {
+        paso();
+        acumulado -= 1000 / 60;
+      }
+      dibujar();
+      requestAnimationFrame(bucle);
+    }
+
+    ajustarPantalla();
+    requestAnimationFrame(bucle);
+  </script>
+</body>
+</html>

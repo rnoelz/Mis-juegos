@@ -1,0 +1,3855 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <title>GTA del Temu</title>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      background: #000;
+      font-family: Arial, sans-serif;
+    }
+    canvas {
+      display: block;
+      position: fixed;
+      top: 0;
+      left: 0;
+    }
+    #juego3d {
+      display: none;
+    }
+  </style>
+  <!-- three.js: librería para dibujar en 3D (se usa en la vista en primera persona, tecla V) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+</head>
+<body>
+  <canvas id="juego3d"></canvas>
+  <canvas id="juego"></canvas>
+
+  <script>
+    // =====================================================================
+    //  GTA DEL TEMU  -  mundo abierto en San Lorenzo, Valle (Honduras)
+    //  Protagonistas: El Flaco, Willito y El Chevez
+    // =====================================================================
+
+    // 1. PREPARAR EL LIENZO (ocupa toda la pantalla)
+    const canvas = document.getElementById("juego");
+    const ctx = canvas.getContext("2d");
+
+    // Calidad: el juego se dibuja por dentro a 1800 pixeles de alto (1800p),
+    // aunque la ventana sea más pequeña, y el navegador lo ajusta a la pantalla.
+    const ALTO_RESOLUCION = 1800;
+    let RES = 1;            // pixeles reales por cada pixel de la ventana
+    let PW = 0, PH = 0;     // tamaño de la ventana (todo el juego usa estas medidas)
+    function ajustarPantalla() {
+      PW = window.innerWidth;
+      PH = window.innerHeight;
+      RES = Math.max(ALTO_RESOLUCION / PH, window.devicePixelRatio || 1);
+      canvas.width = Math.round(PW * RES);
+      canvas.height = Math.round(PH * RES);
+      canvas.style.width = PW + "px";
+      canvas.style.height = PH + "px";
+      ctx.imageSmoothingQuality = "high";
+      if (mundo3D) {
+        mundo3D.renderer.setPixelRatio(RES);
+        mundo3D.renderer.setSize(window.innerWidth, window.innerHeight);
+        mundo3D.camara.aspect = window.innerWidth / window.innerHeight;
+        mundo3D.camara.updateProjectionMatrix();
+      }
+    }
+    window.addEventListener("resize", ajustarPantalla);
+
+    // 2. EL MAPA DE LA CIUDAD
+    // El mapa es una cuadrícula de letras. Cada letra es un tipo de terreno:
+    //   .  pasto        R  calle           H  Carretera Panamericana
+    //   :  arena        ~  agua (mar)      C  estanque de camarones
+    //   M  manglar      P  plaza/pavimento Y  patio de casa
+    //   D  concreto del puerto             d  muelle de madera
+    //   #  edificio     h  casa            I  iglesia     K  mercado
+    //   E  escuela      G  gasolinera      X  contenedor
+    //   F  casa del Flaco   W  casa de Willito   V  casa del Chevez
+    const T = 64;           // tamaño de cada cuadro en pixeles
+    const COLUMNAS = 64;
+    const FILAS = 48;
+    const mapa = [];
+    for (let y = 0; y < FILAS; y++) mapa.push(new Array(COLUMNAS).fill("."));
+
+    const edificios = [];   // para dibujar cada edificio completo
+    const adornos = [];     // árboles, palmeras, esculturas, grúas...
+
+    // Números "al azar" que siempre salen iguales (así la ciudad no cambia)
+    let semilla = 12345;
+    function azar() {
+      semilla = (semilla * 16807) % 2147483647;
+      return semilla / 2147483647;
+    }
+
+    function pintar(x, y, w, h, letra) {
+      for (let yy = y; yy < y + h; yy++) {
+        for (let xx = x; xx < x + w; xx++) {
+          if (xx >= 0 && yy >= 0 && xx < COLUMNAS && yy < FILAS) mapa[yy][xx] = letra;
+        }
+      }
+    }
+    function edificio(x, y, w, h, letra, color, nombre) {
+      pintar(x, y, w, h, letra);
+      edificios.push({ x: x, y: y, w: w, h: h, letra: letra, color: color, nombre: nombre || "" });
+    }
+    const COLORES_CASA = ["#e57373", "#64b5f6", "#81c784", "#ffb74d", "#ba68c8", "#4db6ac", "#f06292", "#a1887f", "#ffd54f", "#90a4ae"];
+
+    function construirCiudad() {
+      // Mar (Golfo de Fonseca) y playa
+      pintar(0, 40, COLUMNAS, 8, "~");
+      pintar(0, 38, COLUMNAS, 2, ":");
+
+      // Carretera Panamericana (CA-1): 2 filas de ancho
+      pintar(0, 4, COLUMNAS, 2, "H");
+
+      // Calles de la ciudad
+      for (let x of [8, 18, 28, 38, 48]) pintar(x, 6, 1, 31, "R");
+      pintar(8, 12, 55, 1, "R");
+      pintar(8, 20, 55, 1, "R");
+      pintar(8, 28, 55, 1, "R");
+      pintar(2, 36, 61, 1, "R");      // calle del malecón
+      pintar(2, 37, 47, 1, "P");      // paseo del malecón
+
+      // Cuadras normales con casitas
+      const especiales = ["19,6", "19,13", "29,13", "39,13", "9,13", "19,21", "29,21", "39,21", "9,29", "19,29", "29,29"];
+      for (let bx of [9, 19, 29, 39]) {
+        for (let by of [6, 13, 21, 29]) {
+          if (especiales.includes(bx + "," + by)) continue;
+          if (by === 6) {
+            // junto a la carretera: negocios grandes
+            edificio(bx + 1, 7, 3, 3, "#", "#b0bec5", "");
+            edificio(bx + 5, 7, 3, 3, "#", "#bcaaa4", "");
+            continue;
+          }
+          for (let ox of [0, 3, 6]) {
+            for (let oy of [0, 4]) {
+              if (azar() < 0.18) continue;   // algunos lotes quedan vacíos
+              edificio(bx + ox, by + oy, 2, 2, "h", COLORES_CASA[Math.floor(azar() * COLORES_CASA.length)]);
+            }
+          }
+        }
+      }
+
+      // Gasolinera junto a la Panamericana
+      pintar(19, 6, 9, 3, "P");
+      edificio(21, 6, 4, 1, "G", "#eeeeee", "Gasolinera");
+      edificio(20, 10, 3, 2, "#", "#bcaaa4", "");
+      edificio(24, 10, 3, 2, "#", "#b0bec5", "");
+
+      // Hotel y Alcaldía
+      edificio(20, 14, 7, 4, "#", "#9575cd", "Hotel Morazán");
+      edificio(30, 14, 7, 4, "#", "#e0c080", "Alcaldía");
+
+      // Escuela
+      pintar(39, 13, 9, 7, "Y");
+      edificio(40, 14, 6, 3, "E", "#4fc3f7", "Escuela");
+
+      // Parque Central con la Iglesia
+      pintar(19, 21, 9, 7, "P");
+      edificio(21, 21, 5, 2, "I", "#f5f0dc", "Iglesia");
+
+      // Mercado
+      pintar(29, 21, 9, 7, "P");
+      edificio(30, 22, 7, 4, "K", "#ef6c00", "Mercado");
+
+      // Casa del Flaco
+      pintar(10, 14, 5, 5, "Y");
+      edificio(11, 14, 3, 2, "F", "#1e88e5", "");
+      edificio(15, 14, 2, 2, "h", "#81c784");
+      edificio(15, 17, 2, 2, "h", "#ffb74d");
+
+      // Casa de Willito
+      pintar(41, 22, 5, 5, "Y");
+      edificio(42, 22, 3, 2, "W", "#fdd835", "");
+      edificio(39, 22, 2, 2, "h", "#e57373");
+      edificio(39, 25, 2, 2, "h", "#64b5f6");
+      edificio(46, 22, 2, 2, "h", "#ba68c8");
+      edificio(46, 25, 2, 2, "h", "#4db6ac");
+
+      // Casa del Chevez (la más grande: vive con su esposa y sus 2 hijos)
+      pintar(10, 29, 7, 6, "Y");
+      edificio(11, 29, 4, 2, "V", "#e53935", "");
+
+      // Casa de Yoni (el busero)
+      pintar(20, 30, 5, 5, "Y");
+      edificio(21, 30, 3, 2, "N", "#43a047", "");
+      edificio(25, 30, 2, 2, "h", "#ffb74d");
+      edificio(25, 33, 2, 2, "h", "#90a4ae");
+
+      // Terminal de Buses (donde trabaja Yoni)
+      pintar(29, 29, 9, 7, "P");
+      edificio(30, 29, 5, 2, "#", "#26a69a", "Terminal de Buses");
+
+      // Zona de bodegas (camino al puerto)
+      edificio(50, 7, 5, 3, "#", "#90a4ae", "Bodega");
+      edificio(57, 7, 5, 3, "#", "#78909c", "Bodega");
+      edificio(50, 14, 5, 4, "#", "#a1887f", "Bodega");
+      edificio(57, 14, 5, 4, "#", "#90a4ae", "Bodega");
+      edificio(50, 22, 5, 4, "#", "#78909c", "Bodega");
+      edificio(57, 22, 5, 4, "#", "#a1887f", "Bodega");
+
+      // Puerto de Henecán
+      pintar(49, 29, 15, 7, "D");
+      pintar(49, 37, 15, 1, "D");
+      pintar(49, 36, 14, 1, "R");
+      const COLORES_CONTENEDOR = ["#e53935", "#1e88e5", "#43a047", "#fb8c00", "#8e24aa"];
+      for (let cy of [30, 32, 34]) {
+        for (let cx of [51, 55, 59]) {
+          edificio(cx, cy, 3, 1, "X", COLORES_CONTENEDOR[Math.floor(azar() * COLORES_CONTENEDOR.length)]);
+        }
+      }
+      pintar(54, 38, 4, 7, "d");   // muelle
+      adornos.push({ tipo: "barco", x: 59.2 * T, y: 41 * T });
+      adornos.push({ tipo: "grua", x: 54.3 * T, y: 40 * T });
+      adornos.push({ tipo: "grua", x: 57.7 * T, y: 43 * T });
+
+      // Camaroneras (estanques de camarón)
+      for (let py = 8; py <= 32; py += 4) {
+        pintar(1, py, 2, 3, "C");
+        pintar(4, py, 2, 3, "C");
+      }
+
+      // Paseo Turístico La Cabaña: manglares y estero
+      pintar(28, 37, 9, 3, "M");
+      pintar(30, 38, 5, 2, "~");
+
+      // Esculturas y plazas
+      adornos.push({ tipo: "tiburon", x: 23.5 * T, y: 24.5 * T });
+      adornos.push({ tipo: "camaron", x: 13.5 * T, y: 37.5 * T });
+      adornos.push({ tipo: "pelicano", x: 45.5 * T, y: 37.5 * T });
+
+      // Árboles y palmeras
+      for (let y = 0; y < FILAS; y++) {
+        for (let x = 0; x < COLUMNAS; x++) {
+          let t = mapa[y][x];
+          if (t === ":" && azar() < 0.25) adornos.push({ tipo: "palmera", x: (x + 0.2 + azar() * 0.6) * T, y: (y + 0.2 + azar() * 0.6) * T });
+          if (t === "." && !junto(x, y, "RH") && azar() < 0.22) adornos.push({ tipo: "arbol", x: (x + 0.3 + azar() * 0.4) * T, y: (y + 0.3 + azar() * 0.4) * T });
+          if (t === "P" && x >= 19 && x <= 27 && y >= 23 && y <= 27 && (x === 19 || x === 27 || y === 27) && azar() < 0.7) {
+            adornos.push({ tipo: "arbol", x: (x + 0.5) * T, y: (y + 0.5) * T });
+          }
+        }
+      }
+    }
+
+    function letraEn(tx, ty) {
+      if (tx < 0 || ty < 0 || tx >= COLUMNAS || ty >= FILAS) return "~";
+      return mapa[ty][tx];
+    }
+    // ¿El cuadro (x, y) tiene al lado alguna de estas letras?
+    function junto(x, y, letras) {
+      return letras.includes(letraEn(x + 1, y)) || letras.includes(letraEn(x - 1, y)) ||
+             letras.includes(letraEn(x, y + 1)) || letras.includes(letraEn(x, y - 1));
+    }
+    function letraEnPixel(px, py) {
+      return letraEn(Math.floor(px / T), Math.floor(py / T));
+    }
+    const SOLIDO = "#hIKEGXFWVN~CM";
+    function solidoEn(px, py) {
+      return SOLIDO.includes(letraEnPixel(px, py));
+    }
+    function esCalle(tx, ty) {
+      let l = letraEn(tx, ty);
+      return l === "R" || l === "H";
+    }
+    function centro(tx, ty) {
+      return { x: tx * T + T / 2, y: ty * T + T / 2 };
+    }
+
+    // 3. LUGARES IMPORTANTES (en cuadros del mapa)
+    const LUGARES = {
+      casaFlaco:   { x: 12.5, y: 16.5 }, casaWillito: { x: 43.5, y: 24.5 }, casaChevez: { x: 13, y: 31.5 },
+      camaronera:  { x: 6.5,  y: 22.5 }, puerto:      { x: 56,   y: 33.5 }, escuela:    { x: 43, y: 18.5 },
+      mercado:     { x: 33.5, y: 27 },   cabana:      { x: 23.5, y: 37.5 }, parque:     { x: 23.5, y: 27 },
+      tiburon:     { x: 23.5, y: 25.3 }, camaron:     { x: 13.5, y: 37.5 }, pelicano:   { x: 45.5, y: 37.5 },
+      puertoViejo: { x: 40.5, y: 37.5 }, gasolinera:  { x: 23,   y: 7.5 },  iglesia:    { x: 23.5, y: 23.5 },
+      pan1: { x: 40, y: 5 }, pan2: { x: 61, y: 4.5 }, pan3: { x: 30, y: 4 }, pan4: { x: 2.5, y: 5 }, pan5: { x: 18, y: 4.5 },
+      paq1: { x: 18.5, y: 15.5 }, paq2: { x: 48.5, y: 24.5 }, paq3: { x: 28.5, y: 33.5 }, paq4: { x: 8.5, y: 30.5 }, paq5: { x: 38.5, y: 9.5 },
+      marcaF1: { x: 10.5, y: 18.5 }, marcaW1: { x: 41.5, y: 26.5 }, marcaW2: { x: 31, y: 27 }, marcaW3: { x: 37.5, y: 30.5 },
+      marcaC1: { x: 10.5, y: 33.5 }, marcaC2: { x: 16.5, y: 30.5 },
+      casaYoni: { x: 22.5, y: 32.5 }, terminal: { x: 33.5, y: 32 },
+      marcaY1: { x: 30.5, y: 34.5 }, marcaY2: { x: 36.5, y: 34.5 }, marcaY3: { x: 36.5, y: 31.5 }
+    };
+    function lugarPx(nombre) {
+      let l = LUGARES[nombre];
+      return { x: l.x * T, y: l.y * T };
+    }
+
+    // Zonas con nombre (para el letrero de abajo)
+    const ZONAS = [
+      { nombre: "Casa del Flaco", x: 9, y: 13, w: 9, h: 7 },
+      { nombre: "Casa de Willito", x: 39, y: 21, w: 9, h: 7 },
+      { nombre: "Casa del Chevez", x: 9, y: 29, w: 9, h: 7 },
+      { nombre: "Casa de Yoni", x: 19, y: 29, w: 9, h: 7 },
+      { nombre: "Terminal de Buses", x: 29, y: 29, w: 9, h: 7 },
+      { nombre: "Parque Central", x: 19, y: 21, w: 9, h: 7 },
+      { nombre: "Mercado Municipal", x: 29, y: 21, w: 9, h: 7 },
+      { nombre: "Escuela", x: 39, y: 13, w: 9, h: 7 },
+      { nombre: "Alcaldía", x: 29, y: 13, w: 9, h: 7 },
+      { nombre: "Hotel Morazán", x: 19, y: 13, w: 9, h: 7 },
+      { nombre: "Gasolinera", x: 19, y: 6, w: 9, h: 3 },
+      { nombre: "Carretera Panamericana (CA-1)", x: 0, y: 3, w: 64, h: 3 },
+      { nombre: "Camaroneras", x: 0, y: 6, w: 8, h: 32 },
+      { nombre: "Puerto de Henecán", x: 49, y: 28, w: 15, h: 20 },
+      { nombre: "Paseo La Cabaña", x: 20, y: 36, w: 17, h: 4 },
+      { nombre: "Plaza Puerto Viejo", x: 37, y: 36, w: 7, h: 3 },
+      { nombre: "Malecón de San Lorenzo", x: 0, y: 36, w: 49, h: 4 },
+      { nombre: "Golfo de Fonseca", x: 0, y: 40, w: 64, h: 8 },
+      { nombre: "Bodegas", x: 49, y: 6, w: 15, h: 22 },
+      { nombre: "Centro de San Lorenzo", x: 8, y: 6, w: 41, h: 30 }
+    ];
+    function zonaEn(px, py) {
+      let tx = px / T, ty = py / T;
+      for (let z of ZONAS) {
+        if (tx >= z.x && tx < z.x + z.w && ty >= z.y && ty < z.y + z.h) return z.nombre;
+      }
+      return "Afueras de San Lorenzo";
+    }
+
+    // 4. LOS PROTAGONISTAS
+    const PERSONAJES = [
+      { nombre: "El Flaco", letra: "F", camisa: "#1e88e5", piel: "#c68642", pelo: "#3e2723", gorra: "#0d47a1",
+        escala: 0.95, ancho: 0.78, correr: 4.0, casa: "casaFlaco", carro: { color: "#1565c0", tipo: "deportivo", x: 13.5, y: 18.2 },
+        nombreCasa: "Casa del Flaco", color: "#1e88e5", colorClaro: "#90caf9",
+        descripcion: "Alto, flaco y el más rápido corriendo" },
+      { nombre: "Willito", letra: "W", camisa: "#fdd835", piel: "#8d5524", pelo: "#111111", gorra: null,
+        escala: 0.82, ancho: 1, correr: 3.6, casa: "casaWillito", carro: { color: "#fbc02d", tipo: "taxi", x: 44.5, y: 26.3 },
+        nombreCasa: "Casa de Willito", color: "#fbc02d", colorClaro: "#fff59d",
+        descripcion: "Bajito, taxista del barrio" },
+      { nombre: "El Chevez", letra: "C", camisa: "#e53935", piel: "#a0522d", pelo: "#2b1b0e", gorra: null, bigote: true,
+        escala: 1.15, ancho: 1.12, correr: 3.2, casa: "casaChevez", carro: { color: "#b71c1c", tipo: "pickup", x: 15.3, y: 33.4 },
+        nombreCasa: "Casa del Chevez", color: "#e53935", colorClaro: "#ef9a9a",
+        descripcion: "Padre de familia: esposa y 2 hijos" },
+      { nombre: "Yoni", letra: "Y", camisa: "#43a047", piel: "#b5794b", pelo: "#1a1a1a", gorra: null, lentes: true,
+        escala: 1.02, ancho: 1.05, correr: 3.5, casa: "casaYoni", carro: { color: "#ff7043", tipo: "bus", x: 33.5, y: 33.3 },
+        nombreCasa: "Casa de Yoni", color: "#43a047", colorClaro: "#a5d6a7",
+        descripcion: "Busero de la ruta San Lorenzo" }
+    ];
+    let jugadores = [];     // dónde está cada protagonista
+    let activo = 0;         // a quién estás manejando
+
+    // 5. VARIABLES DEL JUEGO
+    let carros = [];
+    let peatones = [];
+    let burbujas = [];      // globitos de texto
+    let teclas = {};
+    let estado = "inicio";  // "inicio", "jugando", "cambiando", "menu", "mapa", "controles", "casa"
+    let cuadro = 0;
+    let camX = 0, camY = 0, zoom = 1;
+    let temblor = 0;
+    let estrellas = 0;             // nivel de búsqueda de la policía (0 a 5)
+    let enfriamientoEstrellas = 0;
+    let tiempoEscondido = 0;
+    let arresto = 0;
+    let misionActiva = null;
+    let misionesHechas = [];
+    let aviso = null;              // mensaje grande que aparece un rato
+    let zonaActual = "", zonaCuadros = 0;
+    let transicion = null;         // al cambiar de personaje
+    let opcionMenu = 0;
+    const OPCIONES_MENU = ["▶ Seguir jugando", "🗺 Ver mapa", "🎮 Controles", "✖ Cancelar misión", "🏠 Volver al inicio"];
+
+    // La familia del Chevez
+    let familia = { esposa: "casa", hijos: "casa", volver: 0 };
+
+    // 6. GUARDAR Y CARGAR
+    function guardar() {
+      try {
+        localStorage.setItem("gtaDelTemu", JSON.stringify({ dinero: jugadores.map(j => j.dinero), hechas: misionesHechas }));
+      } catch (e) {}
+    }
+    function cargarGuardado() {
+      try {
+        let datos = JSON.parse(localStorage.getItem("gtaDelTemu"));
+        if (datos) {
+          datos.dinero.forEach((d, i) => { if (jugadores[i]) jugadores[i].dinero = d; });
+          misionesHechas = datos.hechas || [];
+        }
+      } catch (e) {}
+    }
+
+    // 7. LEER EL TECLADO
+    document.addEventListener("keydown", function (e) {
+      teclas[e.code] = true;
+      if (e.code.startsWith("Arrow") || e.code === "Space" || e.code === "Backspace" || e.code === "Tab") e.preventDefault();
+      let enter = e.key === "Enter";
+
+      if (estado === "inicio") {
+        if (enter) estado = "jugando";
+
+      } else if (estado === "jugando") {
+        if (e.code === "KeyE" && !e.repeat) interactuar();
+        if (e.code === "KeyQ" && !e.repeat) bocina();
+        if (e.code === "Digit1") cambiarA(0);
+        if (e.code === "Digit2") cambiarA(1);
+        if (e.code === "Digit3") cambiarA(2);
+        if (e.code === "Digit4") cambiarA(3);
+        if (e.code === "Tab") cambiarA((activo + 1) % PERSONAJES.length);
+        if (e.code === "KeyM") estado = "mapa";
+        if (e.code === "Backspace") { estado = "menu"; opcionMenu = 0; }
+        if (e.code === "KeyV" && !e.repeat) alternarVista();
+
+      } else if (estado === "menu") {
+        if (e.code === "ArrowUp")   opcionMenu = (opcionMenu + OPCIONES_MENU.length - 1) % OPCIONES_MENU.length;
+        if (e.code === "ArrowDown") opcionMenu = (opcionMenu + 1) % OPCIONES_MENU.length;
+        if (e.code === "Backspace") estado = "jugando";
+        if (enter) {
+          if (opcionMenu === 0) estado = "jugando";
+          if (opcionMenu === 1) estado = "mapa";
+          if (opcionMenu === 2) estado = "controles";
+          if (opcionMenu === 3) { if (misionActiva) fallarMision("Cancelaste la misión"); estado = "jugando"; }
+          if (opcionMenu === 4) { guardar(); estado = "inicio"; }
+        }
+
+      } else if (estado === "casa") {
+        if (e.code === "KeyE" && !e.repeat) interactuarCasa();
+
+      } else if (estado === "mapa" || estado === "controles") {
+        if (e.code === "KeyM" || e.code === "Backspace" || enter) estado = "jugando";
+      }
+    });
+    document.addEventListener("keyup", function (e) {
+      teclas[e.code] = false;
+    });
+
+    function tecla(...codigos) {
+      return codigos.some(c => teclas[c]);
+    }
+
+    // 8. CREAR CARROS Y GENTE
+    const COLORES_CARRO = ["#e53935", "#1e88e5", "#43a047", "#fdd835", "#fb8c00", "#8e24aa", "#eeeeee", "#212121", "#6d4c41", "#00acc1"];
+
+    function nuevoCarro(x, y, ang, color, tipo) {
+      let c = { x: x, y: y, ang: ang, vel: 0, color: color, tipo: tipo || "normal",
+                w: tipo === "bus" ? 92 : (tipo === "pickup" ? 52 : 46), h: tipo === "bus" ? 30 : (tipo === "pickup" ? 26 : 24),
+                conductor: null, ai: null, atascado: 0, reversa: 0, dueño: -1 };
+      carros.push(c);
+      return c;
+    }
+
+    // Desplazamiento para ir por el carril de la derecha
+    function carril(dx, dy) {
+      return { x: -dy * 15, y: dx * 15 };
+    }
+
+    function crearTrafico() {
+      let intentos = 0;
+      while (intentos++ < 500) {
+        let tx = Math.floor(azar() * COLUMNAS), ty = Math.floor(azar() * FILAS);
+        if (!esCalle(tx, ty)) continue;
+        let opciones = [[1, 0], [-1, 0], [0, 1], [0, -1]].filter(d => esCalle(tx + d[0], ty + d[1]) &&
+                          !(letraEn(tx, ty) === "H" && d[1] !== 0));
+        if (opciones.length === 0) continue;
+        let d = opciones[Math.floor(azar() * opciones.length)];
+        let p = centro(tx, ty), o = carril(d[0], d[1]);
+        // que no quede encima de otro carro
+        if (carros.some(c => Math.hypot(c.x - p.x - o.x, c.y - p.y - o.y) < 80)) continue;
+        let c = nuevoCarro(p.x + o.x, p.y + o.y, Math.atan2(d[1], d[0]), COLORES_CARRO[Math.floor(azar() * COLORES_CARRO.length)]);
+        c.conductor = "npc";
+        c.ai = { dx: d[0], dy: d[1], tx: tx + d[0], ty: ty + d[1], espera: 0, paciencia: 0 };
+        return;
+      }
+    }
+
+    const CAMINABLE_PEATON = ".PY:Dd";
+    function crearPeaton(x, y) {
+      let p = { x: x, y: y, ang: azar() * Math.PI * 2, vel: 0.8 + azar() * 0.4, t: 0,
+                salto: 0, sx: 0, sy: 0, paso: 0, huyendo: 0,
+                camisa: COLORES_CARRO[Math.floor(azar() * COLORES_CARRO.length)],
+                piel: ["#f1c27d", "#c68642", "#8d5524", "#e0ac69"][Math.floor(azar() * 4)],
+                pelo: ["#111", "#3e2723", "#6d4c41", "#bdbdbd"][Math.floor(azar() * 4)] };
+      peatones.push(p);
+      return p;
+    }
+    function crearPeatonesAlAzar(cantidad) {
+      let hechos = 0, intentos = 0;
+      while (hechos < cantidad && intentos++ < 5000) {
+        let tx = 8 + Math.floor(azar() * 45), ty = 6 + Math.floor(azar() * 33);
+        if (!CAMINABLE_PEATON.includes(letraEn(tx, ty))) continue;
+        crearPeaton((tx + 0.5) * T, (ty + 0.5) * T);
+        hechos++;
+      }
+    }
+
+    function nuevoMundo() {
+      carros = [];
+      peatones = [];
+      burbujas = [];
+      jugadores = PERSONAJES.map((p, i) => {
+        let casa = lugarPx(p.casa);
+        let c = nuevoCarro(p.carro.x * T, p.carro.y * T, 0, p.carro.color, p.carro.tipo);
+        c.dueño = i;
+        return { x: casa.x, y: casa.y, ang: Math.PI / 2, carro: null, dinero: 500, paso: 0 };
+      });
+      // Carros estacionados
+      nuevoCarro(31 * T, 27.2 * T, 0, "#43a047");
+      nuevoCarro(35.5 * T, 27.2 * T, Math.PI, "#8e24aa");
+      nuevoCarro(52.5 * T, 31.5 * T, 0, "#eeeeee");
+      nuevoCarro(20.5 * T, 8 * T, 0, "#fb8c00");
+      nuevoCarro(45 * T, 17.5 * T, 0, "#00acc1");
+      for (let i = 0; i < 30; i++) crearTrafico();
+      crearPeatonesAlAzar(55);
+      estrellas = 0;
+      misionActiva = null;
+      familia = { esposa: "casa", hijos: "casa", volver: 0 };
+      cargarGuardado();
+      activo = 0;
+      let j = jugadores[0];
+      camX = j.x; camY = j.y;
+    }
+
+    // 9. MENSAJES
+    function mostrarAviso(titulo, texto, duracion) {
+      aviso = { titulo: titulo, texto: texto || "", t: duracion || 240 };
+    }
+    function decir(objeto, texto, duracion) {
+      // No repetir el mismo globito encima de la misma persona
+      burbujas = burbujas.filter(b => b.obj !== objeto);
+      burbujas.push({ obj: objeto, texto: texto, t: duracion || 120 });
+      if (burbujas.length > 14) burbujas.shift();
+    }
+
+    // 10. EL JUGADOR
+    function jugadorActual() {
+      return jugadores[activo];
+    }
+    // Posición del jugador (si va en carro, la del carro)
+    function posJugador(i) {
+      let j = jugadores[i === undefined ? activo : i];
+      return j.carro ? { x: j.carro.x, y: j.carro.y } : { x: j.x, y: j.y };
+    }
+
+    function interactuar() {
+      let j = jugadorActual();
+      let p = posJugador();
+
+      // ¿Empezar una misión?
+      if (!misionActiva && !j.carro) {
+        for (let m of MISIONES) {
+          if (m.personaje !== activo) continue;
+          let l = lugarPx(m.inicio);
+          if (Math.hypot(p.x - l.x, p.y - l.y) < 50) {
+            empezarMision(m);
+            return;
+          }
+        }
+      }
+
+      // ¿Entrar a la casa? (adentro estás a salvo: se borran las estrellas y se guarda)
+      if (!j.carro) {
+        let casa = lugarPx(PERSONAJES[activo].casa);
+        if (Math.hypot(p.x - casa.x, p.y - casa.y) < 45) {
+          if (misionActiva) {
+            mostrarAviso("Ahorita no", "Termina tu misión primero", 150);
+            return;
+          }
+          if (estrellas > 0 && carros.some(c => c.tipo === "policia" && Math.hypot(c.x - p.x, c.y - p.y) < 500)) {
+            mostrarAviso("¡No puedes entrar!", "La policía está muy cerca", 150);
+            return;
+          }
+          estrellas = 0;
+          guardar();
+          entrarCasa();
+          mostrarAviso(PERSONAJES[activo].nombreCasa, "Estás a salvo. Juego guardado.", 150);
+          return;
+        }
+      }
+
+      // Bajarse del carro
+      if (j.carro) {
+        let c = j.carro;
+        if (Math.abs(c.vel) > 1.5) return;
+        for (let lado of [1, -1]) {
+          let nx = c.x + Math.cos(c.ang + lado * Math.PI / 2) * 30;
+          let ny = c.y + Math.sin(c.ang + lado * Math.PI / 2) * 30;
+          if (!solidoPie(nx, ny)) {
+            j.x = nx; j.y = ny;
+            c.conductor = null;
+            c.vel = 0;
+            j.carro = null;
+            j.ang = c.ang;
+            mirarYaw = c.ang;
+            return;
+          }
+        }
+        return;
+      }
+
+      // Subirse a un carro cercano
+      let mejor = null, mejorDist = 60;
+      for (let c of carros) {
+        if (c.tipo === "policia" || c.conductor === "personaje") continue;
+        let d = Math.hypot(c.x - j.x, c.y - j.y);
+        if (d < mejorDist) { mejor = c; mejorDist = d; }
+      }
+      if (mejor) {
+        if (mejor.conductor === "npc") {
+          // El conductor se baja molesto
+          let p2 = crearPeaton(mejor.x + Math.cos(mejor.ang + Math.PI / 2) * 30, mejor.y + Math.sin(mejor.ang + Math.PI / 2) * 30);
+          p2.huyendo = 180;
+          decir(p2, "¡Oye! ¡Mi carro!", 150);
+          subirEstrellas(1);
+        } else if (mejor.dueño >= 0 && mejor.dueño !== activo) {
+          decir(j, "Le presto el carro a " + PERSONAJES[mejor.dueño].nombre, 120);
+        }
+        mejor.ai = null;
+        mejor.conductor = "jugador";
+        j.carro = mejor;
+      }
+    }
+
+    function bocina() {
+      let p = posJugador();
+      let j = jugadorActual();
+      decir(j.carro || j, j.carro ? "¡PIII PIII!" : "¡Epa!", 60);
+      for (let pe of peatones) {
+        if (Math.hypot(pe.x - p.x, pe.y - p.y) < 200 && azar() < 0.4) {
+          decir(pe, ["¿Qué pasó?", "¡Ya voy!", "¡Qué escándalo!", "Tranquilo, pues"][Math.floor(azar() * 4)], 100);
+        }
+      }
+    }
+
+    function cambiarA(i) {
+      if (i === activo || estado !== "jugando") return;
+      if (misionActiva) {
+        mostrarAviso("Termina tu misión primero", "O cancélala en el menú (Backspace)", 150);
+        return;
+      }
+      // El que se queda: si está en un carro, el carro se queda estacionado con él adentro
+      let viejo = jugadorActual();
+      if (viejo.carro) { viejo.carro.conductor = "personaje"; viejo.carro.vel = 0; }
+      transicion = { desdeX: camX, desdeY: camY, hacia: i, t: 0 };
+      estado = "cambiando";
+    }
+
+    function actualizarCambio() {
+      transicion.t++;
+      let f = transicion.t / 80;
+      let suave = f < 0.5 ? 2 * f * f : 1 - Math.pow(-2 * f + 2, 2) / 2;
+      let destino = posJugador(transicion.hacia);
+      camX = transicion.desdeX + (destino.x - transicion.desdeX) * suave;
+      camY = transicion.desdeY + (destino.y - transicion.desdeY) * suave;
+      zoom = 1 - 0.7 * Math.sin(Math.PI * f);
+      if (transicion.t >= 80) {
+        activo = transicion.hacia;
+        let j = jugadorActual();
+        if (j.carro) j.carro.conductor = "jugador";
+        estado = "jugando";
+        zoom = 1;
+        mostrarAviso(PERSONAJES[activo].nombre, PERSONAJES[activo].descripcion, 120);
+      }
+    }
+
+    // ¿La persona choca con algo en (px, py)?
+    function solidoPie(px, py) {
+      const r = 9;
+      return solidoEn(px - r, py) || solidoEn(px + r, py) || solidoEn(px, py - r) || solidoEn(px, py + r);
+    }
+
+    function caminar(j) {
+      let dx = (tecla("ArrowRight", "KeyD") ? 1 : 0) - (tecla("ArrowLeft", "KeyA") ? 1 : 0);
+      let dy = (tecla("ArrowDown", "KeyS") ? 1 : 0) - (tecla("ArrowUp", "KeyW") ? 1 : 0);
+      if (dx === 0 && dy === 0) return;
+      let largo = Math.hypot(dx, dy);
+      let vel = tecla("ShiftLeft", "ShiftRight") ? PERSONAJES[activo].correr : 2.2;
+      let nx = j.x + dx / largo * vel, ny = j.y + dy / largo * vel;
+      if (!solidoPie(nx, j.y)) j.x = nx;
+      if (!solidoPie(j.x, ny)) j.y = ny;
+      j.ang = Math.atan2(dy, dx);
+      j.paso += vel * 0.12;
+      // No atravesar carros
+      for (let c of carros) {
+        let d = Math.hypot(j.x - c.x, j.y - c.y);
+        if (d < 26 && d > 0) {
+          let ex = j.x + (j.x - c.x) / d * (26 - d), ey = j.y + (j.y - c.y) / d * (26 - d);
+          if (!solidoPie(ex, ey)) { j.x = ex; j.y = ey; }
+        }
+      }
+    }
+
+    // 11. MANEJAR CARROS
+    function velocidadMaximaEn(c) {
+      let l = letraEnPixel(c.x, c.y);
+      if (l === "R" || l === "H" || l === "D" || l === "d") return 7.5;
+      if (l === "P" || l === "Y") return 5;
+      return 3.5;   // pasto y arena
+    }
+
+    function carroChoca(c) {
+      let cos = Math.cos(c.ang), sin = Math.sin(c.ang);
+      let puntos = [[0.5, 0.45], [0.5, -0.45], [-0.5, 0.45], [-0.5, -0.45], [0.5, 0], [0, 0.45], [0, -0.45]];
+      for (let p of puntos) {
+        let px = c.x + cos * p[0] * c.w - sin * p[1] * c.h;
+        let py = c.y + sin * p[0] * c.w + cos * p[1] * c.h;
+        if (solidoEn(px, py)) return true;
+      }
+      return false;
+    }
+
+    function moverCarro(c) {
+      let viejoX = c.x, viejoY = c.y;
+      c.x += Math.cos(c.ang) * c.vel;
+      c.y += Math.sin(c.ang) * c.vel;
+      if (carroChoca(c)) {
+        c.x = viejoX;
+        c.y = viejoY;
+        if (c.conductor === "jugador" && Math.abs(c.vel) > 3) temblor = 8;
+        c.vel *= -0.3;
+      }
+    }
+
+    function manejar(c) {
+      let adelante = tecla("ArrowUp", "KeyW"), atras = tecla("ArrowDown", "KeyS");
+      let giro = (tecla("ArrowRight", "KeyD") ? 1 : 0) - (tecla("ArrowLeft", "KeyA") ? 1 : 0);
+      let freno = tecla("Space");
+      let maxima = velocidadMaximaEn(c);
+      let esBus = c.tipo === "bus";
+      if (esBus) maxima *= 0.8;   // el bus es más lento y gira menos
+
+      if (adelante) c.vel += c.vel < 0 ? 0.3 : (esBus ? 0.1 : 0.16);
+      else if (atras) c.vel -= c.vel > 0 ? 0.3 : 0.12;
+      else c.vel *= 0.985;
+      if (freno) c.vel *= 0.93;
+      if (c.vel > maxima) c.vel = Math.max(maxima, c.vel - 0.3);
+      c.vel = Math.max(-2.5, c.vel);
+
+      let viejoAng = c.ang;
+      c.ang += giro * (esBus ? 0.038 : 0.05) * Math.min(1, Math.abs(c.vel) / 3) * Math.sign(c.vel) * (freno ? 1.4 : 1);
+      if (carroChoca(c)) c.ang = viejoAng;
+      moverCarro(c);
+    }
+
+    function diferenciaAngulo(a, b) {
+      let d = b - a;
+      while (d > Math.PI) d -= Math.PI * 2;
+      while (d < -Math.PI) d += Math.PI * 2;
+      return d;
+    }
+
+    // Tráfico: los carros siguen las calles y doblan en las esquinas
+    function elegirSiguiente(c) {
+      let ai = c.ai;
+      let aqui = letraEn(ai.tx, ai.ty);
+      let opciones = [];
+      for (let d of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        if (d[0] === -ai.dx && d[1] === -ai.dy) continue;                 // no dar vuelta en U
+        if (!esCalle(ai.tx + d[0], ai.ty + d[1])) continue;
+        if (aqui === "H" && letraEn(ai.tx + d[0], ai.ty + d[1]) === "H" && d[1] !== 0) continue;
+        opciones.push(d);
+      }
+      let d;
+      if (opciones.length === 0) d = [-ai.dx, -ai.dy];                   // calle cerrada: regresar
+      else if (opciones.some(o => o[0] === ai.dx && o[1] === ai.dy) && Math.random() < 0.65) d = [ai.dx, ai.dy];
+      else d = opciones[Math.floor(Math.random() * opciones.length)];
+      ai.dx = d[0]; ai.dy = d[1];
+      ai.tx += d[0]; ai.ty += d[1];
+    }
+
+    function hayAlgoEnfrente(c) {
+      let cos = Math.cos(c.ang), sin = Math.sin(c.ang);
+      let cosas = carros.filter(o => o !== c).map(o => ({ x: o.x, y: o.y }));
+      let j = jugadorActual();
+      if (!j.carro) cosas.push({ x: j.x, y: j.y });
+      for (let i = 0; i < jugadores.length; i++) if (i !== activo && !jugadores[i].carro) cosas.push(jugadores[i]);
+      for (let o of cosas) {
+        let rx = o.x - c.x, ry = o.y - c.y;
+        let frente = rx * cos + ry * sin;
+        let lado = -rx * sin + ry * cos;
+        if (frente > 0 && frente < 62 && Math.abs(lado) < 20) return true;
+      }
+      return false;
+    }
+
+    function actualizarTrafico(c) {
+      let ai = c.ai;
+      if (ai.espera > 0) {
+        ai.espera--;
+        c.vel *= 0.9;
+        moverCarro(c);
+        return;
+      }
+      let p = centro(ai.tx, ai.ty), o = carril(ai.dx, ai.dy);
+      let objX = p.x + o.x, objY = p.y + o.y;
+      if (Math.hypot(objX - c.x, objY - c.y) < 10) {
+        elegirSiguiente(c);
+        return;
+      }
+      let deseado = Math.atan2(objY - c.y, objX - c.x);
+      let dif = diferenciaAngulo(c.ang, deseado);
+      c.ang += Math.max(-0.12, Math.min(0.12, dif));
+
+      let bloqueado = ai.paciencia < 150 && hayAlgoEnfrente(c);
+      if (bloqueado) {
+        ai.paciencia++;
+        if (ai.paciencia === 100) decir(c, "¡PIIIP!", 70);
+      } else if (ai.paciencia > 0) {
+        ai.paciencia = ai.paciencia >= 150 ? (ai.paciencia + 1 > 210 ? 0 : ai.paciencia + 1) : 0;
+      }
+      let objetivo = bloqueado ? 0 : (Math.abs(dif) > 0.5 ? 1.3 : 2.4);
+      c.vel += (objetivo - c.vel) * 0.1;
+      c.x += Math.cos(c.ang) * c.vel;
+      c.y += Math.sin(c.ang) * c.vel;
+    }
+
+    // 12. LA POLICÍA
+    function subirEstrellas(n) {
+      if (enfriamientoEstrellas > 0) return;
+      let antes = estrellas;
+      estrellas = Math.min(5, estrellas + n);
+      enfriamientoEstrellas = 90;
+      tiempoEscondido = 0;
+      if (antes === 0 && estrellas > 0) mostrarAviso("¡La policía te busca!", "Escóndete o vete a tu casa", 150);
+    }
+
+    function crearPatrulla() {
+      let p = posJugador();
+      for (let i = 0; i < 60; i++) {
+        let tx = Math.floor(Math.random() * COLUMNAS), ty = Math.floor(Math.random() * FILAS);
+        if (!esCalle(tx, ty)) continue;
+        let c = centro(tx, ty);
+        let d = Math.hypot(c.x - p.x, c.y - p.y);
+        if (d < 700 || d > 1200) continue;
+        let patrulla = nuevoCarro(c.x, c.y, Math.atan2(p.y - c.y, p.x - c.x), "#fafafa", "policia");
+        patrulla.conductor = "policia";
+        return;
+      }
+    }
+
+    // Mapa de "distancias hasta el jugador" para que las patrullas encuentren el camino
+    // esquivando los edificios (se recalcula cada medio segundo)
+    let campoPolicia = null;
+    function calcularCampoPolicia() {
+      let p = posJugador();
+      let inicio = Math.floor(p.y / T) * COLUMNAS + Math.floor(p.x / T);
+      campoPolicia = new Int16Array(COLUMNAS * FILAS).fill(-1);
+      if (inicio < 0 || inicio >= campoPolicia.length) return;
+      let cola = [inicio];
+      campoPolicia[inicio] = 0;
+      for (let i = 0; i < cola.length; i++) {
+        let actual = cola[i], x = actual % COLUMNAS, y = Math.floor(actual / COLUMNAS);
+        for (let d of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+          let nx = x + d[0], ny = y + d[1];
+          if (nx < 0 || ny < 0 || nx >= COLUMNAS || ny >= FILAS) continue;
+          let k = ny * COLUMNAS + nx;
+          if (campoPolicia[k] !== -1 || SOLIDO.includes(mapa[ny][nx])) continue;
+          campoPolicia[k] = campoPolicia[actual] + 1;
+          cola.push(k);
+        }
+      }
+    }
+
+    // Hacia dónde tiene que ir la patrulla: al cuadro vecino más cerca del jugador
+    function siguientePuntoPolicia(c) {
+      let tx = Math.floor(c.x / T), ty = Math.floor(c.y / T);
+      let aqui = campoPolicia ? campoPolicia[ty * COLUMNAS + tx] : -1;
+      if (aqui <= 1) return posJugador();
+      let mejor = null, mejorValor = aqui;
+      for (let d of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        let nx = tx + d[0], ny = ty + d[1];
+        if (nx < 0 || ny < 0 || nx >= COLUMNAS || ny >= FILAS) continue;
+        let v = campoPolicia[ny * COLUMNAS + nx];
+        if (v >= 0 && v < mejorValor) { mejorValor = v; mejor = centro(nx, ny); }
+      }
+      return mejor || posJugador();
+    }
+
+    function actualizarPolicia(c) {
+      let p = posJugador();
+      let d = Math.hypot(p.x - c.x, p.y - c.y);
+
+      if (estrellas === 0) {
+        // Ya no te buscan: se van
+        c.vel = Math.min(c.vel + 0.1, 3);
+        moverCarro(c);
+        if (d > 1100) c.borrar = true;
+        return;
+      }
+      if (c.reversa > 0) {
+        c.reversa--;
+        c.vel = -2;
+        c.ang += 0.03;
+        moverCarro(c);
+        return;
+      }
+      let objetivo = siguientePuntoPolicia(c);
+      let deseado = Math.atan2(objetivo.y - c.y, objetivo.x - c.x);
+      let dif = diferenciaAngulo(c.ang, deseado);
+      c.ang += Math.max(-0.08, Math.min(0.08, dif));
+      let maxima = Math.min(velocidadMaximaEn(c), 5.4 + estrellas * 0.35);
+      if (d < 70) maxima = 1;   // frena cuando ya te alcanzó
+      c.vel += c.vel < maxima ? 0.15 : -0.3;
+      if (Math.abs(dif) > 1.2) c.vel *= 0.95;
+      let x0 = c.x, y0 = c.y;
+      moverCarro(c);
+      // ¿Se quedó atascado? retrocede un poco
+      if (Math.hypot(c.x - x0, c.y - y0) < 0.4 && d > 90) c.atascado++;
+      else c.atascado = 0;
+      if (c.atascado > 40) { c.reversa = 35; c.atascado = 0; }
+    }
+
+    function actualizarBusqueda() {
+      if (enfriamientoEstrellas > 0) enfriamientoEstrellas--;
+      let p = posJugador();
+      let patrullas = carros.filter(c => c.tipo === "policia" && !c.borrar);
+
+      // Más estrellas = más patrullas
+      if (estrellas > 0 && patrullas.length < Math.min(4, estrellas) && cuadro % 90 === 0) crearPatrulla();
+      if (patrullas.length > 0 && cuadro % 30 === 0) calcularCampoPolicia();
+
+      if (estrellas > 0) {
+        let cerca = patrullas.some(c => Math.hypot(c.x - p.x, c.y - p.y) < 800);
+        tiempoEscondido = cerca ? 0 : tiempoEscondido + 1;
+        if (tiempoEscondido > 420) {
+          estrellas--;
+          tiempoEscondido = 0;
+          if (estrellas === 0) mostrarAviso("Perdiste a la policía", "Ya no te buscan", 150);
+        }
+        // ¿Te agarraron? (si te quedas quieto con una patrulla encima)
+        let j = jugadorActual();
+        let velocidad = j.carro ? Math.abs(j.carro.vel) : (tecla("ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "KeyW", "KeyA", "KeyS", "KeyD") ? 2 : 0);
+        let pegada = patrullas.some(c => Math.hypot(c.x - p.x, c.y - p.y) < 75);
+        if (pegada && velocidad < 1.2) arresto++;
+        else arresto = Math.max(0, arresto - 2);
+        if (arresto > 120) teAgarraron();
+      } else {
+        arresto = 0;
+      }
+    }
+
+    function teAgarraron() {
+      let j = jugadorActual();
+      let multa = Math.min(j.dinero, 200);
+      j.dinero -= multa;
+      if (misionActiva) fallarMision("Te agarró la policía");
+      if (j.carro) { j.carro.conductor = null; j.carro.vel = 0; j.carro = null; }
+      let casa = lugarPx(PERSONAJES[activo].casa);
+      j.x = casa.x; j.y = casa.y;
+      estrellas = 0;
+      arresto = 0;
+      carros = carros.filter(c => c.tipo !== "policia");
+      camX = j.x; camY = j.y;
+      guardar();
+      mostrarAviso("¡TE AGARRÓ LA POLICÍA!", "Pagaste L. " + multa + " de multa y te mandaron a tu casa", 240);
+    }
+
+    // 13. CHOQUES ENTRE CARROS Y PEATONES
+    // Cada carro se toma como un círculo; el bus (que es largo) como 3 círculos en fila
+    function circulosDe(c) {
+      if (c.tipo !== "bus") return [{ x: c.x, y: c.y }];
+      let cos = Math.cos(c.ang), sin = Math.sin(c.ang);
+      return [-30, 0, 30].map(o => ({ x: c.x + cos * o, y: c.y + sin * o }));
+    }
+
+    function chocarCarros() {
+      for (let i = 0; i < carros.length; i++) {
+        for (let k = i + 1; k < carros.length; k++) {
+          let a = carros[i], b = carros[k];
+          let lejos = (a.tipo === "bus" || b.tipo === "bus") ? 100 : 40;
+          if (Math.abs(b.x - a.x) > lejos || Math.abs(b.y - a.y) > lejos) continue;
+          // Buscar los dos círculos que más se están encimando
+          let dx = 0, dy = 0, d = 99999;
+          for (let ca of circulosDe(a)) for (let cb of circulosDe(b)) {
+            let ddx = cb.x - ca.x, ddy = cb.y - ca.y, dd = Math.hypot(ddx, ddy);
+            if (dd < d) { d = dd; dx = ddx; dy = ddy; }
+          }
+          const minimo = 34;
+          if (d >= minimo || d === 0) continue;
+          let nx = dx / d, ny = dy / d, empuje = (minimo - d) / 2;
+          let impacto = Math.abs(a.vel) + Math.abs(b.vel);
+
+          for (let [c, signo] of [[a, -1], [b, 1]]) {
+            let x0 = c.x, y0 = c.y;
+            c.x += nx * empuje * signo;
+            c.y += ny * empuje * signo;
+            if (carroChoca(c)) { c.x = x0; c.y = y0; }
+          }
+          a.vel *= 0.6;
+          b.vel *= 0.6;
+
+          let delJugador = a.conductor === "jugador" ? a : (b.conductor === "jugador" ? b : null);
+          if (delJugador && impacto > 3.5) {
+            let otro = delJugador === a ? b : a;
+            temblor = 8;
+            if (otro.ai) { otro.ai.espera = 60; decir(otro, ["¡Fíjese!", "¡PIIIP!", "¡Ay, mi carro!"][Math.floor(Math.random() * 3)], 90); }
+            if (otro.conductor === "npc" || otro.tipo === "policia") subirEstrellas(1);
+          }
+        }
+      }
+    }
+
+    function actualizarPeatones() {
+      let p = posJugador();
+      for (let pe of peatones) {
+        // Solo mover a los que están cerca (para que el juego vaya rápido)
+        if (Math.abs(pe.x - p.x) > 1400 || Math.abs(pe.y - p.y) > 1000) continue;
+
+        if (pe.salto > 0) {
+          pe.salto--;
+          let nx = pe.x + pe.sx, ny = pe.y + pe.sy;
+          if (!solidoPie(nx, ny)) { pe.x = nx; pe.y = ny; }
+          continue;
+        }
+
+        // Esquivar carros que vienen rápido (nadie sale lastimado)
+        for (let c of carros) {
+          if (Math.abs(c.vel) < 1.8) continue;
+          let d = Math.hypot(pe.x - c.x, pe.y - c.y);
+          if (d < 48) {
+            let ax = (pe.x - c.x) / (d || 1), ay = (pe.y - c.y) / (d || 1);
+            pe.sx = ax * 4.5; pe.sy = ay * 4.5; pe.salto = 14;
+            decir(pe, ["¡Cuidado!", "¡Ay!", "¡Fíjese por dónde va!", "¡Casi me atropella!"][Math.floor(Math.random() * 4)], 100);
+            if (c.conductor === "jugador" && Math.abs(c.vel) > 4) subirEstrellas(1);
+            break;
+          }
+        }
+        if (pe.salto > 0) continue;
+
+        // Caminar tranquilo
+        pe.t--;
+        let vel = pe.huyendo > 0 ? 2.6 : pe.vel;
+        if (pe.huyendo > 0) pe.huyendo--;
+        if (pe.t <= 0) {
+          pe.ang = Math.floor(Math.random() * 4) * Math.PI / 2 + (Math.random() - 0.5) * 0.5;
+          pe.t = 60 + Math.random() * 180;
+        }
+        let nx = pe.x + Math.cos(pe.ang) * vel, ny = pe.y + Math.sin(pe.ang) * vel;
+        let letra = letraEnPixel(nx + Math.cos(pe.ang) * 10, ny + Math.sin(pe.ang) * 10);
+        if (!solidoPie(nx, ny) && (CAMINABLE_PEATON.includes(letra) || pe.huyendo > 0)) {
+          pe.x = nx; pe.y = ny;
+          pe.paso += vel * 0.12;
+        } else {
+          pe.t = 0;
+        }
+      }
+    }
+
+    // 14. LA FAMILIA DEL CHEVEZ
+    function posicionesFamilia() {
+      let lista = [];
+      let brinco = Math.abs(Math.sin(cuadro * 0.1)) * 2;
+      if (familia.esposa === "casa") lista.push({ quien: "esposa", x: 11.4 * T, y: 32.2 * T, ang: Math.PI / 2 });
+      if (familia.hijos === "casa") {
+        lista.push({ quien: "hijo", x: (12.3 + Math.sin(cuadro * 0.02) * 0.6) * T, y: 33.2 * T - brinco, ang: cuadro * 0.02 });
+        lista.push({ quien: "hija", x: 10.8 * T, y: (33.4 + Math.cos(cuadro * 0.025) * 0.4) * T, ang: -cuadro * 0.025 });
+      } else if (familia.hijos === "escuela") {
+        lista.push({ quien: "hijo", x: 42.3 * T, y: 18.2 * T - brinco, ang: Math.PI / 2 });
+        lista.push({ quien: "hija", x: 43.8 * T, y: 18.4 * T, ang: Math.PI / 2 });
+      }
+      return lista;
+    }
+
+    function actualizarFamilia() {
+      if (familia.volver > 0) {
+        familia.volver--;
+        if (familia.volver === 0 && familia.hijos === "escuela") familia.hijos = "casa";
+      }
+      if (cuadro % 200 !== 0) return;
+      let p = posJugador();
+      for (let f of posicionesFamilia()) {
+        if (Math.hypot(f.x - p.x, f.y - p.y) > 180 || Math.random() < 0.4) continue;
+        let frases;
+        if (activo === 2) {
+          frases = f.quien === "esposa" ? ["¡Hola mi amor!", "¿Y el mandado, Chevez?", "La comida ya está lista"]
+                                        : ["¡Papá!", "¡Vamos a jugar!", "¿Me compra una churrita?"];
+        } else {
+          frases = f.quien === "esposa" ? ["Buenas, ¿busca al Chevez?", "El Chevez no está"] : ["¡Hola!", "¿Usted es amigo de mi papá?"];
+        }
+        decir(f, frases[Math.floor(Math.random() * frases.length)], 150);
+      }
+    }
+
+    // 14b. ADENTRO DE LA CASA (presiona E en la puerta de tu casa)
+    // Cada casa es una cuadrícula de letras, igual que la ciudad:
+    //   #  pared                    p  puerta para salir
+    //   m  piso de madera (sala)    c  azulejo (cocina)     b  baño
+    //   a  alfombra (cuarto)        k  cuarto de los niños
+    const CELDA = 40;   // tamaño de cada cuadro adentro de la casa
+    const PLANOS = {
+      normal: [
+        "#################",
+        "#aaaaa#bbb#ccccc#",
+        "#aaaaa#bbb#ccccc#",
+        "#aaaaa#bbb#ccccc#",
+        "#aaaaa#bbb#ccccc#",
+        "##mm####m###mmm##",
+        "#mmmmmmmmmmmmmmm#",
+        "#mmmmmmmmmmmmmmm#",
+        "#mmmmmmmmmmmmmmm#",
+        "#mmmmmmmmmmmmmmm#",
+        "########p########"
+      ],
+      // La del Chevez es más grande: tiene un cuarto para los niños
+      grande: [
+        "######################",
+        "#aaaaa#kkkk#bbb#ccccc#",
+        "#aaaaa#kkkk#bbb#ccccc#",
+        "#aaaaa#kkkk#bbb#ccccc#",
+        "#aaaaa#kkkk#bbb#ccccc#",
+        "##mm####mm###m###mmm##",
+        "#mmmmmmmmmmmmmmmmmmmm#",
+        "#mmmmmmmmmmmmmmmmmmmm#",
+        "#mmmmmmmmmmmmmmmmmmmm#",
+        "#mmmmmmmmmmmmmmmmmmmm#",
+        "##########p###########"
+      ]
+    };
+    const MARCO_CASA = ["⚽", "🚕", "👨‍👩‍👧‍👦", "🚌"];   // el cuadro colgado en la sala de cada uno
+
+    // Los muebles (en cuadros). "piso: true" = se puede pasar por encima.
+    function mueblesDe(grande) {
+      let b = grande ? 12 : 7, c = grande ? 16 : 11, ancho = grande ? 22 : 17;
+      let m = [
+        { tipo: "cama", x: 1, y: 1, w: 2.2, h: 3, accion: "dormir" },
+        { tipo: "mesita", x: 3.3, y: 1, w: 0.8, h: 0.8 },
+        { tipo: "ropero", x: 4.3, y: 1, w: 1.6, h: 0.9 },
+        { tipo: "inodoro", x: b + 0.15, y: 1.1, w: 0.8, h: 1 },
+        { tipo: "ducha", x: b + 1.4, y: 1, w: 1.6, h: 1.6, accion: "ducha" },
+        { tipo: "lavamanos", x: b + 2.1, y: 3.2, w: 0.9, h: 0.8 },
+        { tipo: "refri", x: c, y: 1, w: 1, h: 1.1, accion: "comer" },
+        { tipo: "estufa", x: c + 1.2, y: 1, w: 1.2, h: 0.8, accion: "cocinar" },
+        { tipo: "meson", x: c + 2.6, y: 1, w: 2.4, h: 0.8 },
+        { tipo: "mesa", x: c + 2.3, y: 2.9, w: 1.7, h: 1.1 },
+        { tipo: "alfombra", x: 2.2, y: 6.6, w: 3.6, h: 2.8, piso: true },
+        { tipo: "tele", x: 1, y: 7.1, w: 0.5, h: 1.8, accion: "tele" },
+        { tipo: "mesitaCentro", x: 2.9, y: 7.5, w: 1, h: 1 },
+        { tipo: "sofa", x: 4.6, y: 6.8, w: 1, h: 2.4, accion: "sentarse" },
+        { tipo: "hamaca", x: ancho - 6.5, y: 7.3, w: 4.5, h: 1, accion: "hamaca", piso: true },
+        { tipo: "planta", x: 1.1, y: 9.1, w: 0.75, h: 0.75 },
+        { tipo: "planta", x: ancho - 1.85, y: 9.1, w: 0.75, h: 0.75 },
+        { tipo: "planta", x: ancho - 1.85, y: 6.15, w: 0.75, h: 0.75 }
+      ];
+      if (grande) {
+        m.push({ tipo: "camita", x: 7.1, y: 1, w: 1.1, h: 2, color: "#42a5f5" });
+        m.push({ tipo: "camita", x: 9.8, y: 1, w: 1.1, h: 2, color: "#f48fb1" });
+        m.push({ tipo: "pelota", x: 8.6, y: 3.6, w: 0.4, h: 0.4, piso: true });
+      }
+      // Punto donde salen los globitos de texto de cada mueble
+      for (let o of m) o.ancla = { x: (o.x + o.w / 2) * CELDA, y: (o.y + o.h / 2) * CELDA, dentro: true };
+      return m;
+    }
+    function ventanasDe(grande) {
+      let c = grande ? 16 : 11, ancho = grande ? 22 : 17;
+      let v = [{ x: 1.6, y: 0, w: 2, dir: 1 }, { x: c + 2.8, y: 0, w: 2, dir: 1 },
+               { x: 2.5, y: 10, w: 2.4, dir: -1 }, { x: ancho - 5, y: 10, w: 2.4, dir: -1 }];
+      if (grande) v.push({ x: 8, y: 0, w: 2, dir: 1 });
+      return v;
+    }
+
+    let interior = null;   // la casa en la que estás adentro (o null)
+
+    function entrarCasa() {
+      let grande = activo === 2;
+      let plano = grande ? PLANOS.grande : PLANOS.normal;
+      let alto = plano.length, puerta = plano[alto - 1].indexOf("p");
+      interior = {
+        casa: activo, plano: plano, ancho: plano[0].length, alto: alto,
+        muebles: mueblesDe(grande), ventanas: ventanasDe(grande),
+        puerta: { x: (puerta + 0.5) * CELDA, y: (alto - 1) * CELDA },
+        yo: { x: (puerta + 0.5) * CELDA, y: (alto - 1.6) * CELDA, ang: -Math.PI / 2, paso: 0, dentro: true },
+        sentado: null, paradoEn: null, tele: 0, canal: 0, ducha: 0, estufa: 0, dormir: 0,
+        fundido: 30, saliendo: 0, cerca: null, gente: []
+      };
+      if (grande) {
+        if (familia.esposa === "casa") interior.gente.push({ quien: "esposa", x: 17.8 * CELDA, y: 2.4 * CELDA, ang: -Math.PI / 2, paso: 0, dentro: true });
+        if (familia.hijos === "casa") {
+          interior.gente.push({ quien: "hijo", x: 0, y: 0, ang: 0, paso: 0, dentro: true });
+          interior.gente.push({ quien: "hija", x: 0, y: 0, ang: 0, paso: 0, dentro: true });
+        }
+      }
+      estado = "casa";
+      moverNinos();
+      let hijo = interior.gente.find(g => g.quien === "hijo");
+      if (hijo) decir(hijo, "¡Papá llegó!", 150);
+    }
+
+    function salirCasa() {
+      burbujas = burbujas.filter(b => !b.obj.dentro);
+      interior = null;
+      estado = "jugando";
+    }
+
+    // ¿Hay pared o mueble en (px, py)?
+    function solidoCasa(px, py) {
+      const r = 13;
+      for (let [x, y] of [[px - r, py], [px + r, py], [px, py - r], [px, py + r]]) {
+        let fila = interior.plano[Math.floor(y / CELDA)];
+        let l = fila ? fila[Math.floor(x / CELDA)] : undefined;
+        if (l === undefined || l === "#") return true;
+        for (let m of interior.muebles) {
+          if (!m.piso && x > m.x * CELDA && x < (m.x + m.w) * CELDA && y > m.y * CELDA && y < (m.y + m.h) * CELDA) return true;
+        }
+      }
+      return false;
+    }
+
+    function distanciaAMueble(m, px, py) {
+      let x = m.x * CELDA, y = m.y * CELDA, w = m.w * CELDA, h = m.h * CELDA;
+      return Math.hypot(Math.max(x - px, 0, px - x - w), Math.max(y - py, 0, py - y - h));
+    }
+
+    const TEXTO_ACCION = {
+      dormir: "dormir (guarda el juego)", sentarse: "sentarte en el sofá", hamaca: "acostarte en la hamaca",
+      comer: "abrir la refri", cocinar: "cocinar", ducha: "bañarte"
+    };
+    const NOMBRE_FAMILIA = { esposa: "tu esposa", hijo: "tu hijo", hija: "tu hija" };
+
+    // Lo más cercano con lo que puedes hacer algo
+    function cercaCasa() {
+      let I = interior, yo = I.yo;
+      if (I.sentado) return { texto: "levantarte" };
+      if (Math.hypot(yo.x - I.puerta.x, yo.y - I.puerta.y) < 50) return { tipo: "puerta", texto: "salir de la casa" };
+      for (let g of I.gente) {
+        if (Math.hypot(g.x - yo.x, g.y - yo.y) < 55) return { tipo: "gente", obj: g, texto: "hablar con " + NOMBRE_FAMILIA[g.quien] };
+      }
+      let mejor = null, mejorDist = 26;
+      for (let m of I.muebles) {
+        if (!m.accion) continue;
+        let d = distanciaAMueble(m, yo.x, yo.y);
+        if (d < mejorDist) { mejor = m; mejorDist = d; }
+      }
+      if (!mejor) return null;
+      let t = mejor.accion === "tele" ? (I.tele ? "apagar la tele" : "prender la tele") : TEXTO_ACCION[mejor.accion];
+      return { tipo: "mueble", obj: mejor, texto: t };
+    }
+
+    const CANALES = ["📺 Noticias: ¡38 grados hoy en San Lorenzo!", "📺 ¡Gooool! Olimpia 2 - Motagua 1",
+                     "📺 Telenovela: \"¡Tú no eres mi hijo, Ricardo!\"", "📺 Caricaturas a todo volumen",
+                     "📺 Pronóstico: lluvia en el Golfo de Fonseca"];
+
+    function sentarseEn(m, ang) {
+      let I = interior;
+      I.paradoEn = { x: I.yo.x, y: I.yo.y };
+      I.sentado = m;
+      I.yo.x = (m.x + m.w / 2) * CELDA;
+      I.yo.y = (m.y + m.h / 2) * CELDA;
+      I.yo.ang = ang;
+    }
+    function levantarse() {
+      let I = interior;
+      if (!I.sentado || I.dormir > 0) return;
+      I.sentado = null;
+      I.ducha = 0;
+      I.yo.x = I.paradoEn.x;
+      I.yo.y = I.paradoEn.y;
+    }
+
+    function interactuarCasa() {
+      let I = interior, yo = I.yo;
+      if (I.saliendo || I.dormir) return;
+      let cerca = cercaCasa();
+      if (!cerca) return;
+      if (I.sentado) { levantarse(); return; }
+      if (cerca.tipo === "puerta") { I.saliendo = 20; return; }
+      if (cerca.tipo === "gente") {
+        let g = cerca.obj;
+        let frases = g.quien === "esposa" ? ["¡Hola mi amor!", "La comida ya está lista", "¿Y el mandado, Chevez?", "Lávate las manos antes de comer"]
+                                          : ["¡Papá, juguemos!", "¡No me alcanzas!", "¿Me compra una churrita?", "¡Mire lo que dibujé!"];
+        decir(g, frases[Math.floor(Math.random() * frases.length)], 150);
+        return;
+      }
+      let m = cerca.obj;
+      switch (m.accion) {
+        case "dormir":
+          sentarseEn(m, -Math.PI / 2);
+          I.yo.y = (m.y + 0.9) * CELDA;
+          I.dormir = 180;
+          break;
+        case "sentarse":
+          sentarseEn(m, Math.PI);   // mirando hacia la tele
+          decir(yo, "Ahh... qué rico descansar", 120);
+          break;
+        case "hamaca":
+          sentarseEn(m, Math.PI / 2);
+          decir(yo, "Aquí sí se está fresco 😎", 140);
+          break;
+        case "tele":
+          I.tele = I.tele ? 0 : 1;
+          if (I.tele) { I.canal = (I.canal + 1) % CANALES.length; decir(m.ancla, CANALES[I.canal], 200); }
+          break;
+        case "comer":
+          decir(yo, ["¡Una baleada con todo!", "Unas tajadas con pollo 🍗", "¡Un fresco de horchata bien helado!", "Sopa de caracol de ayer 😋"][Math.floor(Math.random() * 4)], 150);
+          break;
+        case "cocinar":
+          I.estufa = 360;
+          decir(yo, "Echándole a los frijolitos...", 150);
+          break;
+        case "ducha":
+          sentarseEn(m, Math.PI / 2);
+          I.ducha = 240;
+          decir(yo, "¡Qué fresquito! 🚿", 150);
+          break;
+      }
+    }
+
+    // Los hijos del Chevez juegan a la lleva en la sala
+    function moverNinos() {
+      let t = cuadro * 0.03;
+      for (let g of interior.gente) {
+        if (g.quien === "esposa") continue;
+        let a = g.quien === "hijo" ? t : t - 0.9;
+        let nx = (10 + Math.cos(a) * 2.2) * CELDA, ny = (8 + Math.sin(a) * 1.1) * CELDA;
+        g.ang = Math.atan2(ny - g.y, nx - g.x);
+        g.x = nx; g.y = ny;
+        g.paso = cuadro * 0.3;
+      }
+    }
+
+    function actualizarCasa() {
+      let I = interior, yo = I.yo;
+      if (I.fundido > 0) I.fundido--;
+      for (let b of burbujas) b.t--;
+      burbujas = burbujas.filter(b => b.t > 0);
+      moverNinos();
+      if (I.saliendo > 0) {
+        if (--I.saliendo === 0) salirCasa();
+        return;
+      }
+
+      // Dormir: la pantalla se pone negra y se guarda el juego
+      if (I.dormir > 0) {
+        I.dormir--;
+        if (I.dormir === 90) {
+          estrellas = 0;
+          guardar();
+          mostrarAviso("Dormiste como un bebé", "Juego guardado", 200);
+        }
+        if (I.dormir === 0) levantarse();
+        I.cerca = cercaCasa();
+        return;
+      }
+      if (I.tele) {
+        I.tele++;
+        if (I.tele % 420 === 0) {
+          I.canal = (I.canal + 1) % CANALES.length;
+          decir(I.muebles.find(m => m.accion === "tele").ancla, CANALES[I.canal], 200);
+        }
+      }
+      if (I.estufa > 0) I.estufa--;
+      if (I.ducha > 0 && --I.ducha === 0) levantarse();
+
+      let dx = (tecla("ArrowRight", "KeyD") ? 1 : 0) - (tecla("ArrowLeft", "KeyA") ? 1 : 0);
+      let dy = (tecla("ArrowDown", "KeyS") ? 1 : 0) - (tecla("ArrowUp", "KeyW") ? 1 : 0);
+      if ((dx || dy) && I.sentado) levantarse();
+      if ((dx || dy) && !I.sentado) {
+        let largo = Math.hypot(dx, dy);
+        let vel = tecla("ShiftLeft", "ShiftRight") ? 3 : 1.8;
+        let nx = yo.x + dx / largo * vel, ny = yo.y + dy / largo * vel;
+        if (!solidoCasa(nx, yo.y)) yo.x = nx;
+        if (!solidoCasa(yo.x, ny)) yo.y = ny;
+        yo.ang = Math.atan2(dy, dx);
+        yo.paso += vel * 0.14;
+      }
+      // Caminar por la puerta = salir
+      if (yo.y > (I.alto - 0.6) * CELDA) I.saliendo = 20;
+
+      // La familia platica de vez en cuando
+      if (cuadro % 240 === 0 && I.gente.length && Math.random() < 0.6) {
+        let g = I.gente[Math.floor(Math.random() * I.gente.length)];
+        let frases = g.quien === "esposa" ? ["¡Niños, no corran adentro!", "¿Quieres cafecito?", "Ya casi está la cena"]
+                                          : ["¡Te agarré!", "¡No se vale!", "¡Jajaja!", "¡Mamá, él empezó!"];
+        decir(g, frases[Math.floor(Math.random() * frases.length)], 130);
+      }
+      I.cerca = cercaCasa();
+    }
+
+    // 15. MISIONES
+    // Cada misión tiene pasos: "ve a este lugar". Algunos pasos piden ir en carro.
+    const MISIONES = [
+      { id: "f1", personaje: 0, nombre: "Reparto de camarones", inicio: "marcaF1", recompensa: 400, tiempo: 120,
+        intro: "Lleva la carga de camarón al Puerto de Henecán antes de que se eche a perder",
+        pasos: [
+          { texto: "Ve en carro a las camaroneras por la carga", lugar: "camaronera", carro: true, dice: "¡Carga lista! ¡Rápido al puerto!" },
+          { texto: "Lleva los camarones al Puerto de Henecán", lugar: "puerto", carro: true }
+        ] },
+      { id: "f2", personaje: 0, nombre: "Carrera en la Panamericana", inicio: "gasolinera", recompensa: 600, tiempo: 70,
+        intro: "Carrera por la CA-1: pasa por los 5 puntos antes de que se acabe el tiempo",
+        pasos: [
+          { texto: "Punto 1 de 5", lugar: "pan1", carro: true, radio: 90 },
+          { texto: "Punto 2 de 5", lugar: "pan2", carro: true, radio: 90 },
+          { texto: "Punto 3 de 5", lugar: "pan3", carro: true, radio: 90 },
+          { texto: "Punto 4 de 5", lugar: "pan4", carro: true, radio: 90 },
+          { texto: "¡Última meta!", lugar: "pan5", carro: true, radio: 90 }
+        ] },
+      { id: "f3", personaje: 0, nombre: "Tour de las esculturas", inicio: "parque", recompensa: 300,
+        intro: "Un turista quiere fotos de las esculturas de San Lorenzo. Llévalo a todas",
+        pasos: [
+          { texto: "Ve a la escultura de El Tiburón (Parque Central)", lugar: "tiburon", dice: "¡Clic! Qué bonito tiburón" },
+          { texto: "Ve a la escultura de El Camarón (Malecón)", lugar: "camaron", dice: "¡Clic! ¡Un camarón gigante!" },
+          { texto: "Ve a la Plaza Puerto Viejo", lugar: "puertoViejo", dice: "¡Clic!" },
+          { texto: "Ve a la escultura de El Pelícano", lugar: "pelicano" }
+        ] },
+      { id: "w1", personaje: 1, nombre: "El taxi de Willito", inicio: "marcaW1", recompensa: 450,
+        intro: "Hoy toca trabajar de taxista: lleva a 3 pasajeros a donde van",
+        pasos: [
+          { texto: "Recoge al pasajero en el Parque Central", lugar: "parque", carro: true, pasajero: true, dice: "¡Lléveme al puerto, por favor!" },
+          { texto: "Lleva al pasajero al Puerto de Henecán", lugar: "puerto", carro: true, dice: "¡Gracias, amigo!" },
+          { texto: "Recoge a la señora en el Mercado", lugar: "mercado", carro: true, pasajero: true, dice: "Al Paseo La Cabaña, mijo" },
+          { texto: "Lleva a la señora al Paseo La Cabaña", lugar: "cabana", carro: true, dice: "¡Dios se lo pague!" },
+          { texto: "Recoge al profe en la Escuela", lugar: "escuela", carro: true, pasajero: true, dice: "A la gasolinera, rápido" },
+          { texto: "Lleva al profe a la Gasolinera", lugar: "gasolinera", carro: true }
+        ] },
+      { id: "w2", personaje: 1, nombre: "Paquetes perdidos", inicio: "marcaW2", recompensa: 500, tiempo: 150,
+        intro: "A un camión se le cayeron 5 paquetes por toda la ciudad. ¡Júntalos rápido!",
+        pasos: [
+          { texto: "Recoge el paquete 1 de 5", lugar: "paq1", paquete: true },
+          { texto: "Recoge el paquete 2 de 5", lugar: "paq2", paquete: true },
+          { texto: "Recoge el paquete 3 de 5", lugar: "paq3", paquete: true },
+          { texto: "Recoge el paquete 4 de 5", lugar: "paq4", paquete: true },
+          { texto: "Recoge el paquete 5 de 5", lugar: "paq5", paquete: true }
+        ] },
+      { id: "w3", personaje: 1, nombre: "¡Escapa de la policía!", inicio: "marcaW3", recompensa: 700, alEmpezar: "policia",
+        intro: "La policía confundió a Willito con un ladrón. ¡Escápate hasta que te dejen de buscar!",
+        pasos: [
+          { texto: "Pierde a la policía (aléjate y que no te vean)", tipo: "sinEstrellas" }
+        ] },
+      { id: "c1", personaje: 2, nombre: "Tarde para la escuela", inicio: "marcaC1", recompensa: 300,
+        intro: "¡Los niños van tarde a la escuela! Súbelos al carro y llévalos",
+        pasos: [
+          { texto: "Súbete a tu carro y pasa por los niños (frente a tu casa)", lugar: "casaChevez", carro: true, evento: "subirHijos" },
+          { texto: "Lleva a los niños a la Escuela", lugar: "escuela", carro: true, evento: "hijosEscuela" }
+        ] },
+      { id: "c2", personaje: 2, nombre: "El mandado de la esposa", inicio: "marcaC2", recompensa: 250,
+        intro: "Tu esposa necesita cosas del Mercado: tomate, cebolla y tortillas",
+        pasos: [
+          { texto: "Ve al Mercado a comprar", lugar: "mercado", dice: "Tomate, cebolla y tortillas... ¡listo!" },
+          { texto: "Regresa a tu casa con el mandado", lugar: "casaChevez", evento: "mandadoListo" }
+        ] },
+      { id: "c3", personaje: 2, nombre: "Paseo familiar", inicio: "iglesia", recompensa: 400,
+        intro: "Domingo después de misa: lleva a tu esposa y a tus hijos al Paseo La Cabaña",
+        pasos: [
+          { texto: "Ve en carro por tu familia a tu casa", lugar: "casaChevez", carro: true, evento: "subirFamilia" },
+          { texto: "Lleva a la familia al Paseo La Cabaña", lugar: "cabana", carro: true, evento: "familiaCabana" },
+          { texto: "Regresen a la casa", lugar: "casaChevez", carro: true, evento: "familiaCasa" }
+        ] },
+      { id: "y1", personaje: 3, nombre: "La ruta del bus", inicio: "marcaY1", recompensa: 500, tiempo: 180,
+        intro: "¡A trabajar! Haz la ruta del bus por San Lorenzo y recoge a la gente en cada parada",
+        pasos: [
+          { texto: "Súbete a tu bus y ve a la parada del Parque Central", lugar: "parque", bus: true, radio: 90, pasajero: true, dice: "¡Pasen adelante, hay campo!" },
+          { texto: "Parada del Mercado", lugar: "mercado", bus: true, radio: 90, pasajero: true, dice: "Señora: ¿Pasa por el puerto?" },
+          { texto: "Parada del Puerto de Henecán", lugar: "puerto", bus: true, radio: 90, dice: "¡Bajan en el puerto!" },
+          { texto: "Parada de la Escuela", lugar: "escuela", bus: true, radio: 90, pasajero: true, dice: "¡Suban, cipotes!" },
+          { texto: "Regresa a la Terminal de Buses", lugar: "terminal", bus: true, radio: 90 }
+        ] },
+      { id: "y2", personaje: 3, nombre: "Excursión escolar", inicio: "marcaY2", recompensa: 450,
+        intro: "La escuela va de excursión al Paseo La Cabaña y te contrataron a vos",
+        pasos: [
+          { texto: "Recoge a los niños en la Escuela con tu bus", lugar: "escuela", bus: true, radio: 90, pasajero: true, dice: "Niños: ¡Ya viene el bus!" },
+          { texto: "Llévalos al Paseo La Cabaña", lugar: "cabana", bus: true, radio: 90, dice: "Niños: ¡Mire los manglares!" },
+          { texto: "Regrésalos a la Escuela", lugar: "escuela", bus: true, radio: 90, dice: "Maestra: ¡Gracias, don Yoni!" }
+        ] },
+      { id: "y3", personaje: 3, nombre: "Viaje por la Panamericana", inicio: "marcaY3", recompensa: 650, tiempo: 150,
+        intro: "Lleva pasajeros por la CA-1: primero hacia Choluteca y luego hacia Jícaro Galán",
+        pasos: [
+          { texto: "Sube a la Panamericana y ve a la salida hacia Choluteca (este)", lugar: "pan2", bus: true, radio: 100, dice: "¡Bajan los de Choluteca!" },
+          { texto: "Ahora a la salida hacia Jícaro Galán (oeste)", lugar: "pan4", bus: true, radio: 100, dice: "¡Bajan los de Jícaro Galán!" },
+          { texto: "Regresa a la Terminal de Buses", lugar: "terminal", bus: true, radio: 90 }
+        ] }
+    ];
+
+    function empezarMision(m) {
+      misionActiva = { m: m, paso: 0, tiempo: m.tiempo ? m.tiempo * 60 : 0 };
+      mostrarAviso(m.nombre, m.intro, 300);
+      if (m.alEmpezar === "policia") {
+        enfriamientoEstrellas = 0;
+        subirEstrellas(3);
+      }
+    }
+
+    function hacerEvento(nombre) {
+      let j = jugadorActual();
+      let quien = j.carro || j;
+      if (nombre === "subirHijos") { familia.hijos = "carro"; decir(quien, "Niños: ¡Vamos, papá!", 150); }
+      if (nombre === "hijosEscuela") { familia.hijos = "escuela"; familia.volver = 1800; decir(quien, "Niños: ¡Adiós, papá!", 150); }
+      if (nombre === "subirFamilia") { familia.esposa = "carro"; familia.hijos = "carro"; decir(quien, "¡Vámonos de paseo!", 150); }
+      if (nombre === "familiaCabana") decir(quien, "Esposa: ¡Qué bonito el manglar!", 180);
+      if (nombre === "familiaCasa") { familia.esposa = "casa"; familia.hijos = "casa"; }
+      if (nombre === "mandadoListo") decir(quien, "Esposa: ¡Gracias, mi amor!", 150);
+    }
+
+    function actualizarMision() {
+      let p = posJugador();
+      let j = jugadorActual();
+      if (!misionActiva) return;
+      let mi = misionActiva;
+      let paso = mi.m.pasos[mi.paso];
+
+      if (mi.tiempo > 0) {
+        mi.tiempo--;
+        if (mi.tiempo === 0) { fallarMision("Se acabó el tiempo"); return; }
+      }
+
+      let cumplido;
+      if (paso.tipo === "sinEstrellas") {
+        cumplido = estrellas === 0 && cuadro % 2 === 0;
+      } else {
+        let l = lugarPx(paso.lugar);
+        cumplido = Math.hypot(p.x - l.x, p.y - l.y) < (paso.radio || 60) && (!paso.carro || j.carro) &&
+                   (!paso.bus || (j.carro && j.carro.tipo === "bus"));
+      }
+      if (!cumplido) return;
+
+      if (paso.dice) decir(j.carro || j, paso.dice, 150);
+      if (paso.evento) hacerEvento(paso.evento);
+      mi.paso++;
+      if (mi.paso >= mi.m.pasos.length) completarMision();
+    }
+
+    function completarMision() {
+      let m = misionActiva.m;
+      let j = jugadorActual();
+      j.dinero += m.recompensa;
+      if (!misionesHechas.includes(m.id)) misionesHechas.push(m.id);
+      misionActiva = null;
+      guardar();
+      mostrarAviso("¡MISIÓN COMPLETADA!", m.nombre + "   + L. " + m.recompensa, 240);
+    }
+
+    function fallarMision(razon) {
+      misionActiva = null;
+      if (familia.esposa === "carro") familia.esposa = "casa";
+      if (familia.hijos === "carro") familia.hijos = "casa";
+      mostrarAviso("MISIÓN FALLIDA", razon, 200);
+    }
+
+    // 16. ACTUALIZAR TODO
+    function actualizar() {
+      let j = jugadorActual();
+      if (j.carro) {
+        manejar(j.carro);
+        j.x = j.carro.x;
+        j.y = j.carro.y;
+      } else {
+        if (vista3D) caminar3D(j);
+        else caminar(j);
+      }
+
+      for (let c of carros) {
+        if (c.conductor === "npc" && c.ai) actualizarTrafico(c);
+        else if (c.tipo === "policia") actualizarPolicia(c);
+        else if (c.conductor === null && Math.abs(c.vel) > 0.05) { c.vel *= 0.9; moverCarro(c); }
+      }
+      carros = carros.filter(c => !c.borrar);
+      chocarCarros();
+      actualizarPeatones();
+      actualizarFamilia();
+      actualizarBusqueda();
+      actualizarMision();
+
+      // Globitos y avisos
+      for (let b of burbujas) b.t--;
+      burbujas = burbujas.filter(b => b.t > 0);
+      if (temblor > 0) temblor--;
+
+      // Letrero del lugar donde estás
+      let p = posJugador();
+      if (cuadro % 20 === 0) {
+        let z = zonaEn(p.x, p.y);
+        if (z !== zonaActual) { zonaActual = z; zonaCuadros = 180; }
+      }
+      if (zonaCuadros > 0) zonaCuadros--;
+
+      // Cámara: sigue al jugador y se aleja un poco al manejar rápido
+      let adelantoX = j.carro ? Math.cos(j.carro.ang) * j.carro.vel * 18 : 0;
+      let adelantoY = j.carro ? Math.sin(j.carro.ang) * j.carro.vel * 18 : 0;
+      camX += (p.x + adelantoX - camX) * 0.1;
+      camY += (p.y + adelantoY - camY) * 0.1;
+      let zoomObjetivo = j.carro ? 1 - Math.min(0.3, Math.abs(j.carro.vel) / 7.5 * 0.3) : 1;
+      zoom += (zoomObjetivo - zoom) * 0.05;
+    }
+
+    // 17. DIBUJAR EL MAPA UNA SOLA VEZ (en un lienzo aparte, para que el juego vaya rápido)
+    const lienzoMapa = document.createElement("canvas");
+    const lienzoMini = document.createElement("canvas");
+    const lienzoSuelo = document.createElement("canvas");
+    const MINI = 4;   // pixeles por cuadro en el minimapa
+    const DETALLE = 2; // el mapa se pinta al doble de resolución para que se vea nítido en 1800p
+
+    const COLOR_SUELO = { ".": "#6ab04c", "R": "#4a4a4a", "H": "#3b3b3b", ":": "#f1d18a", "~": "#1e88e5", "C": "#4db6ac",
+                          "M": "#6ab04c", "P": "#cfc2b0", "Y": "#8bc34a", "D": "#9e9e9e", "d": "#8d6e63" };
+
+    function prepararMapa() {
+      lienzoMapa.width = COLUMNAS * T * DETALLE;
+      lienzoMapa.height = FILAS * T * DETALLE;
+      let g = lienzoMapa.getContext("2d");
+      g.scale(DETALLE, DETALLE);   // se dibuja igual, pero con el doble de pixeles
+
+      // Suelo de cada cuadro
+      for (let y = 0; y < FILAS; y++) {
+        for (let x = 0; x < COLUMNAS; x++) {
+          let l = mapa[y][x];
+          let px = x * T, py = y * T;
+          g.fillStyle = COLOR_SUELO[l] || "#6ab04c";
+          if (l === "~") g.fillStyle = y >= 43 ? "#1565c0" : (y >= 41 ? "#1976d2" : "#1e88e5");
+          g.fillRect(px, py, T, T);
+
+          if (l === ".") {
+            g.fillStyle = "rgba(0, 0, 0, 0.07)";
+            for (let i = 0; i < 6; i++) g.fillRect(px + azar() * T, py + azar() * T, 3, 3);
+          }
+          if (l === "P") {
+            g.strokeStyle = "rgba(0, 0, 0, 0.08)";
+            g.lineWidth = 1;
+            g.strokeRect(px + 0.5, py + 0.5, T / 2, T / 2);
+            g.strokeRect(px + T / 2 + 0.5, py + T / 2 + 0.5, T / 2 - 1, T / 2 - 1);
+          }
+          if (l === "d") {
+            g.strokeStyle = "rgba(0, 0, 0, 0.25)";
+            for (let i = 0; i < T; i += 10) { g.beginPath(); g.moveTo(px, py + i); g.lineTo(px + T, py + i); g.stroke(); }
+          }
+          if (l === "C") {
+            g.strokeStyle = "#8d6e63";
+            g.lineWidth = 4;
+            g.strokeRect(px + 2, py + 2, T - 4, T - 4);
+          }
+          if (l === "M") {
+            for (let i = 0; i < 5; i++) {
+              g.fillStyle = i % 2 ? "#1b5e20" : "#2e7d32";
+              g.beginPath();
+              g.arc(px + azar() * T, py + azar() * T, 14 + azar() * 10, 0, Math.PI * 2);
+              g.fill();
+            }
+          }
+          // Acera junto a las calles
+          if (l !== "R" && l !== "H" && l !== "~" && l !== "C" && l !== "M") {
+            g.fillStyle = "#bdbdbd";
+            if (esCalle(x - 1, y)) g.fillRect(px, py, 8, T);
+            if (esCalle(x + 1, y)) g.fillRect(px + T - 8, py, 8, T);
+            if (esCalle(x, y - 1)) g.fillRect(px, py, T, 8);
+            if (esCalle(x, y + 1)) g.fillRect(px, py + T - 8, T, 8);
+          }
+          // Líneas de las calles
+          if (l === "R") {
+            let horizontal = esCalle(x - 1, y) || esCalle(x + 1, y);
+            let vertical = esCalle(x, y - 1) || esCalle(x, y + 1);
+            g.fillStyle = "#f5f5f5";
+            if (horizontal && !vertical) { g.fillRect(px + 6, py + T / 2 - 1.5, 20, 3); g.fillRect(px + 38, py + T / 2 - 1.5, 20, 3); }
+            if (vertical && !horizontal) { g.fillRect(px + T / 2 - 1.5, py + 6, 3, 20); g.fillRect(px + T / 2 - 1.5, py + 38, 3, 20); }
+            if (horizontal && vertical) {
+              // Paso de cebra en los cruces
+              g.fillStyle = "rgba(255, 255, 255, 0.5)";
+              for (let i = 6; i < T - 6; i += 10) { g.fillRect(px + i, py + 2, 5, 8); g.fillRect(px + i, py + T - 10, 5, 8); }
+            }
+          }
+          if (l === "H") {
+            g.fillStyle = "#f5f5f5";
+            g.fillRect(px + 8, py + T / 2 - 1.5, 26, 3);             // línea de carriles
+            if (letraEn(x, y - 1) !== "H") g.fillRect(px, py + 3, T, 3);   // orilla
+            if (letraEn(x, y + 1) !== "H") g.fillRect(px, py + T - 6, T, 3);
+            if (letraEn(x, y + 1) === "H") {                        // doble línea amarilla al centro
+              g.fillStyle = "#fdd835";
+              g.fillRect(px, py + T - 3, T, 2);
+              g.fillRect(px, py + T + 1, T, 2);
+            }
+          }
+        }
+      }
+
+      // Copia del suelo sin edificios: es el piso de la vista en primera persona (3D)
+      lienzoSuelo.width = 4096;
+      lienzoSuelo.height = 4096;
+      lienzoSuelo.getContext("2d").drawImage(lienzoMapa, 0, 0, 4096, 4096);
+
+      // Edificios
+      for (let e of edificios) dibujarEdificio(g, e);
+      // Adornos
+      for (let a of adornos) dibujarAdorno(g, a);
+
+      // Letreros grandes de lugares
+      g.textAlign = "center";
+      g.font = "bold 46px Arial";
+      g.fillStyle = "rgba(255, 255, 255, 0.35)";
+      g.fillText("GOLFO DE FONSECA", 30 * T, 45 * T);
+      g.font = "bold 22px Arial";
+      g.fillStyle = "rgba(255, 255, 255, 0.85)";
+      letrero(g, "CAMARONERAS", 3.5 * T, 7.4 * T);
+      letrero(g, "PUERTO DE HENECÁN", 56 * T, 28.7 * T);
+      letrero(g, "PARQUE CENTRAL", 23.5 * T, 26.4 * T);
+      letrero(g, "PASEO LA CABAÑA", 23.5 * T, 38.6 * T);
+      letrero(g, "PLAZA PUERTO VIEJO", 40.5 * T, 38.6 * T);
+      letrero(g, "CARRETERA PANAMERICANA CA-1", 32 * T, 3.4 * T);
+      g.textAlign = "left";
+
+      // Minimapa (cada cuadro es un puntito de color)
+      lienzoMini.width = COLUMNAS * MINI;
+      lienzoMini.height = FILAS * MINI;
+      let m = lienzoMini.getContext("2d");
+      const COLOR_MINI = { ".": "#4e8a3a", "R": "#dddddd", "H": "#ffd54f", ":": "#e6c878", "~": "#1565c0", "C": "#26a69a",
+                           "M": "#1b5e20", "P": "#bcaaa4", "Y": "#7cb342", "D": "#9e9e9e", "d": "#8d6e63",
+                           "#": "#616161", "h": "#795548", "I": "#fff8e1", "K": "#ef6c00", "E": "#4fc3f7", "G": "#e53935",
+                           "X": "#8d6e63", "F": "#1e88e5", "W": "#fdd835", "V": "#e53935", "N": "#43a047" };
+      for (let y = 0; y < FILAS; y++) {
+        for (let x = 0; x < COLUMNAS; x++) {
+          m.fillStyle = COLOR_MINI[mapa[y][x]] || "#4e8a3a";
+          m.fillRect(x * MINI, y * MINI, MINI, MINI);
+        }
+      }
+    }
+
+    function letrero(g, texto, x, y) {
+      g.lineWidth = 4;
+      g.strokeStyle = "rgba(0, 0, 0, 0.6)";
+      g.strokeText(texto, x, y);
+      g.fillText(texto, x, y);
+    }
+
+    function aclarar(color, cantidad) {
+      let n = parseInt(color.slice(1), 16);
+      let r = Math.min(255, Math.max(0, (n >> 16) + cantidad));
+      let v = Math.min(255, Math.max(0, ((n >> 8) & 255) + cantidad));
+      let a = Math.min(255, Math.max(0, (n & 255) + cantidad));
+      return "rgb(" + r + "," + v + "," + a + ")";
+    }
+
+    function dibujarEdificio(g, e) {
+      let m = 6;   // margen para que se vea la acera
+      let x = e.x * T + m, y = e.y * T + m, w = e.w * T - m * 2, h = e.h * T - m * 2;
+      if (e.letra === "X") { m = 3; x = e.x * T + m; y = e.y * T + 14; w = e.w * T - m * 2; h = e.h * T - 28; }
+
+      // Sombra
+      g.fillStyle = "rgba(0, 0, 0, 0.25)";
+      g.fillRect(x + 7, y + 7, w, h);
+
+      if ("hFWVN".includes(e.letra)) {
+        // Casa con techo de dos aguas
+        g.fillStyle = aclarar(e.color, 25);
+        g.fillRect(x, y, w, h / 2);
+        g.fillStyle = aclarar(e.color, -25);
+        g.fillRect(x, y + h / 2, w, h / 2);
+        g.strokeStyle = aclarar(e.color, -60);
+        g.lineWidth = 2;
+        g.strokeRect(x, y, w, h);
+        g.beginPath(); g.moveTo(x, y + h / 2); g.lineTo(x + w, y + h / 2); g.stroke();
+        return;
+      }
+
+      g.fillStyle = e.color;
+      g.fillRect(x, y, w, h);
+
+      if (e.letra === "X") {
+        // Contenedor con rayas
+        g.strokeStyle = "rgba(0, 0, 0, 0.3)";
+        g.lineWidth = 2;
+        for (let i = x + 8; i < x + w; i += 10) { g.beginPath(); g.moveTo(i, y); g.lineTo(i, y + h); g.stroke(); }
+        return;
+      }
+
+      // Techo
+      g.fillStyle = aclarar(e.color, 20);
+      g.fillRect(x + 8, y + 8, w - 16, h - 16);
+
+      if (e.letra === "I") {
+        // Iglesia: dos torres y una cruz
+        g.fillStyle = "#e8e0c8";
+        g.fillRect(x - 4, y + h - 40, 40, 44);
+        g.fillRect(x + w - 36, y + h - 40, 40, 44);
+        g.fillStyle = "#8d6e63";
+        g.beginPath(); g.arc(x + 16, y + h - 18, 12, 0, Math.PI * 2); g.arc(x + w - 16, y + h - 18, 12, 0, Math.PI * 2); g.fill();
+        g.fillStyle = "#6d4c41";
+        g.fillRect(x + w / 2 - 4, y + 12, 8, 50);
+        g.fillRect(x + w / 2 - 18, y + 24, 36, 8);
+      }
+      if (e.letra === "K") {
+        // Mercado: toldos de colores
+        for (let i = 0; i < w; i += 24) {
+          g.fillStyle = (i / 24) % 2 === 0 ? "#ffeb3b" : "#43a047";
+          g.fillRect(x + i, y + h - 18, 24, 18);
+          g.fillStyle = (i / 24) % 2 === 0 ? "#e53935" : "#1e88e5";
+          g.fillRect(x + i, y, 24, 14);
+        }
+      }
+      if (e.letra === "G") {
+        g.fillStyle = "#e53935";
+        g.fillRect(x, y + h - 8, w, 8);
+      }
+      if (e.letra === "#") {
+        // Aires acondicionados en el techo
+        g.fillStyle = "rgba(0, 0, 0, 0.18)";
+        for (let i = 0; i < 3; i++) g.fillRect(x + 16 + i * 26, y + 16, 16, 12);
+      }
+
+      if (e.nombre) {
+        g.textAlign = "center";
+        g.font = "bold 18px Arial";
+        g.fillStyle = "#fff";
+        letrero(g, e.nombre, x + w / 2, y + h / 2 + 6);
+        g.textAlign = "left";
+      }
+    }
+
+    function dibujarAdorno(g, a) {
+      if (a.tipo === "arbol") {
+        g.fillStyle = "rgba(0, 0, 0, 0.2)";
+        g.beginPath(); g.arc(a.x + 6, a.y + 6, 20, 0, Math.PI * 2); g.fill();
+        g.fillStyle = "#2e7d32";
+        g.beginPath(); g.arc(a.x, a.y, 20, 0, Math.PI * 2); g.fill();
+        g.fillStyle = "#43a047";
+        g.beginPath(); g.arc(a.x - 5, a.y - 5, 12, 0, Math.PI * 2); g.fill();
+      } else if (a.tipo === "palmera") {
+        g.fillStyle = "rgba(0, 0, 0, 0.2)";
+        g.beginPath(); g.arc(a.x + 8, a.y + 8, 16, 0, Math.PI * 2); g.fill();
+        g.strokeStyle = "#2e7d32";
+        g.lineWidth = 6;
+        g.lineCap = "round";
+        for (let i = 0; i < 6; i++) {
+          let ang = i * Math.PI / 3 + a.x;
+          g.beginPath(); g.moveTo(a.x, a.y); g.lineTo(a.x + Math.cos(ang) * 22, a.y + Math.sin(ang) * 22); g.stroke();
+        }
+        g.lineCap = "butt";
+        g.fillStyle = "#795548";
+        g.beginPath(); g.arc(a.x, a.y, 5, 0, Math.PI * 2); g.fill();
+      } else if (a.tipo === "tiburon") {
+        pedestal(g, a.x, a.y);
+        g.fillStyle = "#78909c";
+        g.beginPath(); g.ellipse(a.x, a.y, 34, 12, 0, 0, Math.PI * 2); g.fill();
+        g.beginPath(); g.moveTo(a.x - 30, a.y); g.lineTo(a.x - 46, a.y - 14); g.lineTo(a.x - 46, a.y + 14); g.fill();   // cola
+        g.beginPath(); g.moveTo(a.x - 4, a.y - 8); g.lineTo(a.x + 6, a.y - 26); g.lineTo(a.x + 12, a.y - 8); g.fill();  // aleta
+        g.fillStyle = "#111"; g.beginPath(); g.arc(a.x + 22, a.y - 3, 2.5, 0, Math.PI * 2); g.fill();
+      } else if (a.tipo === "camaron") {
+        pedestal(g, a.x, a.y);
+        g.strokeStyle = "#ff8a65";
+        g.lineWidth = 14;
+        g.lineCap = "round";
+        g.beginPath(); g.arc(a.x, a.y, 20, -0.3, Math.PI * 1.3); g.stroke();
+        g.strokeStyle = "#ffab91";
+        g.lineWidth = 2;
+        g.beginPath(); g.moveTo(a.x + 20, a.y - 4); g.lineTo(a.x + 42, a.y - 22); g.moveTo(a.x + 18, a.y - 8); g.lineTo(a.x + 34, a.y - 30); g.stroke();
+        g.lineCap = "butt";
+      } else if (a.tipo === "pelicano") {
+        pedestal(g, a.x, a.y);
+        g.fillStyle = "#fafafa";
+        g.beginPath(); g.ellipse(a.x, a.y + 4, 16, 22, 0, 0, Math.PI * 2); g.fill();
+        g.beginPath(); g.arc(a.x, a.y - 20, 9, 0, Math.PI * 2); g.fill();
+        g.fillStyle = "#ffa000";
+        g.beginPath(); g.moveTo(a.x + 6, a.y - 22); g.lineTo(a.x + 36, a.y - 14); g.lineTo(a.x + 6, a.y - 14); g.fill();
+      } else if (a.tipo === "grua") {
+        g.strokeStyle = "#fbc02d";
+        g.lineWidth = 8;
+        g.strokeRect(a.x - 20, a.y - 20, 40, 40);
+        g.beginPath(); g.moveTo(a.x - 20, a.y - 20); g.lineTo(a.x + 20, a.y + 20); g.moveTo(a.x + 20, a.y - 20); g.lineTo(a.x - 20, a.y + 20); g.stroke();
+        g.fillStyle = "#f9a825";
+        g.fillRect(a.x - 8, a.y - 110, 16, 110);
+      } else if (a.tipo === "barco") {
+        g.fillStyle = "rgba(0, 0, 0, 0.25)";
+        g.fillRect(a.x + 10, a.y + 10, 250, 170);
+        g.fillStyle = "#37474f";
+        g.beginPath();
+        g.moveTo(a.x, a.y); g.lineTo(a.x + 230, a.y); g.lineTo(a.x + 270, a.y + 85); g.lineTo(a.x + 230, a.y + 170); g.lineTo(a.x, a.y + 170);
+        g.closePath(); g.fill();
+        const colores = ["#e53935", "#1e88e5", "#43a047", "#fb8c00"];
+        for (let i = 0; i < 4; i++) for (let k = 0; k < 3; k++) {
+          g.fillStyle = colores[(i + k) % 4];
+          g.fillRect(a.x + 60 + i * 40, a.y + 20 + k * 45, 34, 38);
+        }
+        g.fillStyle = "#eceff1";
+        g.fillRect(a.x + 10, a.y + 40, 40, 90);
+      }
+    }
+    function pedestal(g, x, y) {
+      g.fillStyle = "#9e9e9e";
+      g.beginPath(); g.arc(x, y, 44, 0, Math.PI * 2); g.fill();
+      g.fillStyle = "#bdbdbd";
+      g.beginPath(); g.arc(x, y, 38, 0, Math.PI * 2); g.fill();
+    }
+
+    // 18. DIBUJAR PERSONAS Y CARROS
+    function rectRedondo(x, y, w, h, r) {
+      ctx.beginPath();
+      ctx.moveTo(x + r, y);
+      ctx.arcTo(x + w, y, x + w, y + h, r);
+      ctx.arcTo(x + w, y + h, x, y + h, r);
+      ctx.arcTo(x, y + h, x, y, r);
+      ctx.arcTo(x, y, x + w, y, r);
+      ctx.closePath();
+    }
+
+    // Persona vista desde arriba. "ropa" tiene los colores y detalles.
+    function dibujarPersona(x, y, ang, paso, ropa) {
+      let esc = ropa.escala || 1, ancho = ropa.ancho || 1;
+      ctx.save();
+      ctx.translate(x, y);
+      // sombra
+      ctx.fillStyle = "rgba(0, 0, 0, 0.25)";
+      ctx.beginPath(); ctx.ellipse(3, 4, 10 * esc, 12 * esc * ancho, ang, 0, Math.PI * 2); ctx.fill();
+      ctx.rotate(ang);
+      ctx.scale(esc, esc);
+      let mov = Math.sin(paso) * 5;
+      // pies
+      ctx.fillStyle = "#212121";
+      ctx.beginPath();
+      ctx.ellipse(mov, -5 * ancho, 4, 3, 0, 0, Math.PI * 2);
+      ctx.ellipse(-mov, 5 * ancho, 4, 3, 0, 0, Math.PI * 2);
+      ctx.fill();
+      // brazos
+      ctx.fillStyle = ropa.piel;
+      ctx.beginPath();
+      ctx.arc(-mov * 0.6, -12 * ancho, 3.2, 0, Math.PI * 2);
+      ctx.arc(mov * 0.6, 12 * ancho, 3.2, 0, Math.PI * 2);
+      ctx.fill();
+      // hombros (camisa)
+      ctx.fillStyle = ropa.camisa;
+      ctx.beginPath(); ctx.ellipse(0, 0, 7, 11 * ancho, 0, 0, Math.PI * 2); ctx.fill();
+      if (ropa.vestido) {
+        ctx.beginPath(); ctx.ellipse(-3, 0, 9, 12, 0, 0, Math.PI * 2); ctx.fill();
+      }
+      // cabeza
+      ctx.fillStyle = ropa.piel;
+      ctx.beginPath(); ctx.arc(1, 0, 6.5, 0, Math.PI * 2); ctx.fill();
+      // pelo o gorra
+      if (ropa.gorra) {
+        ctx.fillStyle = ropa.gorra;
+        ctx.beginPath(); ctx.arc(0, 0, 6.8, 0, Math.PI * 2); ctx.fill();
+        ctx.fillRect(3, -4.5, 7, 9);   // visera hacia adelante
+      } else {
+        ctx.fillStyle = ropa.pelo;
+        ctx.beginPath(); ctx.arc(-0.5, 0, 6.3, Math.PI * 0.45, Math.PI * 1.55); ctx.fill();
+        if (ropa.pelolargo) { ctx.beginPath(); ctx.ellipse(-6, 0, 5, 6, 0, 0, Math.PI * 2); ctx.fill(); }
+      }
+      if (ropa.bigote) {
+        ctx.strokeStyle = "#2b1b0e";
+        ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.moveTo(6, -3); ctx.quadraticCurveTo(8, 0, 6, 3); ctx.stroke();
+      }
+      if (ropa.lentes) {
+        ctx.fillStyle = "#111";
+        ctx.fillRect(4.5, -4.5, 2.5, 3.5);
+        ctx.fillRect(4.5, 1, 2.5, 3.5);
+      }
+      ctx.restore();
+    }
+
+    function dibujarCarro(c) {
+      ctx.save();
+      ctx.translate(c.x, c.y);
+      ctx.rotate(c.ang);
+      let w = c.w, h = c.h;
+      // sombra
+      ctx.fillStyle = "rgba(0, 0, 0, 0.3)";
+      rectRedondo(-w / 2 + 3, -h / 2 + 4, w, h, 6);
+      ctx.fill();
+      // carrocería
+      ctx.fillStyle = c.color;
+      rectRedondo(-w / 2, -h / 2, w, h, 6);
+      ctx.fill();
+      if (c.tipo === "policia") {
+        ctx.fillStyle = "#212121";
+        ctx.fillRect(-w / 2 + 12, -h / 2, w - 24, 5);
+        ctx.fillRect(-w / 2 + 12, h / 2 - 5, w - 24, 5);
+      }
+      if (c.tipo === "pickup") {
+        ctx.fillStyle = aclarar(c.color, -40);
+        ctx.fillRect(-w / 2 + 3, -h / 2 + 3, 20, h - 6);   // la paila de atrás
+      }
+      if (c.tipo === "bus") {
+        // Bus: techo blanco con franjas, ventanas a los lados y parabrisas grande
+        ctx.fillStyle = "#fafafa";
+        ctx.fillRect(-w / 2 + 4, -h / 2 + 4, w - 12, h - 8);
+        ctx.fillStyle = c.color;
+        ctx.fillRect(-w / 2 + 4, -2, w - 12, 4);
+        ctx.fillStyle = "#263238";
+        for (let x = -w / 2 + 8; x < w / 2 - 14; x += 12) {
+          ctx.fillRect(x, -h / 2, 9, 3);
+          ctx.fillRect(x, h / 2 - 3, 9, 3);
+        }
+        ctx.fillRect(w / 2 - 7, -h / 2 + 3, 5, h - 6);
+        ctx.fillStyle = "#fff59d";
+        ctx.fillRect(w / 2 - 3, -h / 2 + 2, 3, 6);
+        ctx.fillRect(w / 2 - 3, h / 2 - 8, 3, 6);
+        if (c.conductor && c.conductor !== "policia") {
+          ctx.fillStyle = "#3e2723";
+          ctx.beginPath(); ctx.arc(w / 2 - 14, -h / 4, 4, 0, Math.PI * 2); ctx.fill();
+        }
+        ctx.restore();
+        return;
+      }
+      // vidrios
+      ctx.fillStyle = "#263238";
+      ctx.fillRect(w / 2 - 17, -h / 2 + 3, 7, h - 6);                  // parabrisas
+      if (c.tipo !== "pickup") ctx.fillRect(-w / 2 + 5, -h / 2 + 4, 5, h - 8);   // vidrio de atrás
+      // techo
+      ctx.fillStyle = aclarar(c.color.startsWith("#") ? c.color : "#888888", 25);
+      ctx.fillRect(-w / 2 + (c.tipo === "pickup" ? 25 : 11), -h / 2 + 4, 16, h - 8);
+      // luces
+      ctx.fillStyle = "#fff59d";
+      ctx.fillRect(w / 2 - 3, -h / 2 + 2, 3, 5);
+      ctx.fillRect(w / 2 - 3, h / 2 - 7, 3, 5);
+      ctx.fillStyle = "#e53935";
+      ctx.fillRect(-w / 2, -h / 2 + 2, 3, 5);
+      ctx.fillRect(-w / 2, h / 2 - 7, 3, 5);
+      if (c.tipo === "policia") {
+        let prende = Math.floor(cuadro / 8) % 2 === 0;
+        ctx.fillStyle = prende ? "#ff1744" : "#2979ff";
+        ctx.fillRect(-4, -h / 2 + 3, 6, h / 2 - 3);
+        ctx.fillStyle = prende ? "#2979ff" : "#ff1744";
+        ctx.fillRect(-4, 0, 6, h / 2 - 3);
+      }
+      if (c.tipo === "taxi") {
+        ctx.fillStyle = "#212121";
+        ctx.fillRect(-2, -5, 10, 10);
+        ctx.fillStyle = "#fdd835";
+        ctx.font = "bold 6px Arial";
+        ctx.save(); ctx.rotate(Math.PI / 2); ctx.fillText("TAXI", -7, -2); ctx.restore();
+      }
+      // Alguien manejando
+      if (c.conductor && c.conductor !== "policia") {
+        ctx.fillStyle = "#3e2723";
+        ctx.beginPath(); ctx.arc(3, -5, 4, 0, Math.PI * 2); ctx.fill();
+      }
+      ctx.restore();
+
+      // Luces de la patrulla alumbrando
+      if (c.tipo === "policia") {
+        let prende = Math.floor(cuadro / 8) % 2 === 0;
+        ctx.fillStyle = prende ? "rgba(255, 23, 68, 0.15)" : "rgba(41, 121, 255, 0.15)";
+        ctx.beginPath(); ctx.arc(c.x, c.y, 60, 0, Math.PI * 2); ctx.fill();
+      }
+    }
+
+    function ropaDeProtagonista(i) {
+      let p = PERSONAJES[i];
+      return { camisa: p.camisa, piel: p.piel, pelo: p.pelo, gorra: p.gorra, escala: p.escala, ancho: p.ancho, bigote: p.bigote, lentes: p.lentes };
+    }
+    const ROPA_FAMILIA = {
+      esposa: { camisa: "#8e24aa", piel: "#c68642", pelo: "#111", escala: 0.95, vestido: true, pelolargo: true },
+      hijo:   { camisa: "#43a047", piel: "#a0522d", pelo: "#2b1b0e", escala: 0.62 },
+      hija:   { camisa: "#ff7043", piel: "#a0522d", pelo: "#111", escala: 0.6, pelolargo: true }
+    };
+
+    // Marcas en el suelo (misiones y destinos)
+    function dibujarMarca(x, y, color, letra, grande) {
+      let pulso = 1 + Math.sin(cuadro * 0.1) * 0.12;
+      let r = (grande ? 34 : 24) * pulso;
+      ctx.fillStyle = color + "55";
+      ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 4;
+      ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.stroke();
+      if (letra) {
+        ctx.fillStyle = "white";
+        ctx.font = "bold 18px Arial";
+        ctx.textAlign = "center";
+        ctx.fillText(letra, x, y + 6);
+        ctx.textAlign = "left";
+      }
+    }
+
+    function dibujarBurbuja(b) {
+      let x = b.obj.x, y = b.obj.y - 40;
+      ctx.font = "bold 14px Arial";
+      let ancho = ctx.measureText(b.texto).width + 16;
+      ctx.globalAlpha = Math.min(1, b.t / 20);
+      ctx.fillStyle = "white";
+      rectRedondo(x - ancho / 2, y - 22, ancho, 26, 8);
+      ctx.fill();
+      ctx.beginPath(); ctx.moveTo(x - 6, y + 3); ctx.lineTo(x, y + 12); ctx.lineTo(x + 6, y + 3); ctx.fill();
+      ctx.fillStyle = "#222";
+      ctx.textAlign = "center";
+      ctx.fillText(b.texto, x, y - 4);
+      ctx.textAlign = "left";
+      ctx.globalAlpha = 1;
+    }
+
+    // 19. DIBUJAR EL MUNDO
+    function escalaBase() {
+      return Math.max(0.6, PH / 820);
+    }
+
+    function dibujarMundo(cx, cy, esc) {
+      let W = PW, H = PH;
+      let sacudida = temblor > 0 ? (Math.random() - 0.5) * temblor : 0;
+      ctx.setTransform(esc * RES, 0, 0, esc * RES, (W / 2 - cx * esc + sacudida) * RES, (H / 2 - cy * esc + sacudida) * RES);
+
+      // Parte visible del mapa
+      let izq = cx - W / 2 / esc, arriba = cy - H / 2 / esc;
+      let ancho = W / esc, alto = H / esc;
+      let sx = Math.max(0, Math.floor(izq)), sy = Math.max(0, Math.floor(arriba));
+      let sw = Math.min(COLUMNAS * T - sx, Math.ceil(ancho) + 2), sh = Math.min(FILAS * T - sy, Math.ceil(alto) + 2);
+      if (sw > 0 && sh > 0) ctx.drawImage(lienzoMapa, sx * DETALLE, sy * DETALLE, sw * DETALLE, sh * DETALLE, sx, sy, sw, sh);
+
+      // Olitas en el mar
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.35)";
+      ctx.lineWidth = 2;
+      for (let ty = Math.max(0, Math.floor(arriba / T)); ty < Math.min(FILAS, (arriba + alto) / T + 1); ty++) {
+        for (let tx = Math.max(0, Math.floor(izq / T)); tx < Math.min(COLUMNAS, (izq + ancho) / T + 1); tx++) {
+          if (mapa[ty][tx] !== "~") continue;
+          let ox = ((tx * 37 + ty * 17) % 40) + Math.sin(cuadro * 0.03 + tx) * 6;
+          ctx.beginPath();
+          ctx.arc(tx * T + ox + 10, ty * T + 30 + ((tx * 13) % 20), 7, Math.PI * 1.1, Math.PI * 1.9);
+          ctx.stroke();
+        }
+      }
+
+      let visible = (x, y) => x > izq - 80 && x < izq + ancho + 80 && y > arriba - 80 && y < arriba + alto + 80;
+
+      // Marcas de misión del personaje activo
+      if (!misionActiva && estado !== "inicio") {
+        for (let m of MISIONES) {
+          if (m.personaje !== activo) continue;
+          let l = lugarPx(m.inicio);
+          if (visible(l.x, l.y)) dibujarMarca(l.x, l.y, PERSONAJES[activo].color, misionesHechas.includes(m.id) ? "✓" : "!", false);
+        }
+      }
+      // Casa del personaje activo
+      let casa = lugarPx(PERSONAJES[activo].casa);
+      if (visible(casa.x, casa.y) && estado !== "inicio") {
+        ctx.fillStyle = "rgba(255, 255, 255, 0.25)";
+        ctx.beginPath(); ctx.arc(casa.x, casa.y, 18, 0, Math.PI * 2); ctx.fill();
+      }
+
+      // Destino de la misión
+      if (misionActiva) {
+        let paso = misionActiva.m.pasos[misionActiva.paso];
+        if (paso.lugar) {
+          let l = lugarPx(paso.lugar);
+          if (paso.paquete) {
+            ctx.fillStyle = "#a1887f";
+            ctx.fillRect(l.x - 12, l.y - 12, 24, 24);
+            ctx.strokeStyle = "#5d4037"; ctx.lineWidth = 3;
+            ctx.strokeRect(l.x - 12, l.y - 12, 24, 24);
+          }
+          if (paso.pasajero) dibujarPersona(l.x + 20, l.y - 20, Math.PI / 2, 0, { camisa: "#00897b", piel: "#e0ac69", pelo: "#555" });
+          dibujarMarca(l.x, l.y, "#ffeb3b", "", true);
+        }
+      }
+
+      // Gente
+      for (let pe of peatones) if (visible(pe.x, pe.y)) dibujarPersona(pe.x, pe.y, pe.ang, pe.paso, pe);
+      for (let f of posicionesFamilia()) if (visible(f.x, f.y)) dibujarPersona(f.x, f.y, f.ang, cuadro * 0.1, ROPA_FAMILIA[f.quien]);
+
+      // Protagonistas a pie
+      jugadores.forEach((j, i) => {
+        if (j.carro || estado === "inicio") return;
+        let parpadeo = i === activo || true;
+        if (parpadeo && visible(j.x, j.y)) dibujarPersona(j.x, j.y, j.ang, j.paso, ropaDeProtagonista(i));
+      });
+
+      // Carros
+      for (let c of carros) if (visible(c.x, c.y)) dibujarCarro(c);
+
+      // Nombres de los protagonistas
+      if (estado !== "inicio") {
+        ctx.font = "bold 13px Arial";
+        ctx.textAlign = "center";
+        jugadores.forEach((j, i) => {
+          let p = posJugador(i);
+          if (!visible(p.x, p.y)) return;
+          ctx.fillStyle = i === activo ? "#ffeb3b" : "white";
+          ctx.lineWidth = 3;
+          ctx.strokeStyle = "rgba(0, 0, 0, 0.7)";
+          ctx.strokeText(PERSONAJES[i].nombre, p.x, p.y - 26);
+          ctx.fillText(PERSONAJES[i].nombre, p.x, p.y - 26);
+        });
+        // Letrero de las casas
+        ctx.font = "bold 16px Arial";
+        for (let i = 0; i < PERSONAJES.length; i++) {
+          let c = lugarPx(PERSONAJES[i].casa);
+          if (!visible(c.x, c.y)) continue;
+          ctx.fillStyle = PERSONAJES[i].colorClaro;
+          let nombreCasa = PERSONAJES[i].nombreCasa;
+          ctx.strokeText(nombreCasa, c.x, c.y - 100);
+          ctx.fillText(nombreCasa, c.x, c.y - 100);
+        }
+        ctx.textAlign = "left";
+      }
+
+      // Globitos de texto
+      for (let b of burbujas) if (visible(b.obj.x, b.obj.y)) dibujarBurbuja(b);
+    }
+
+    // 20. PANTALLA: HUD, MINIMAPA Y MENÚS
+    function texto(t, x, y) {
+      ctx.lineWidth = 4;
+      ctx.lineJoin = "round";
+      ctx.strokeStyle = "rgba(0, 0, 0, 0.75)";
+      ctx.strokeText(t, x, y);
+      ctx.fillStyle = "white";
+      ctx.fillText(t, x, y);
+    }
+
+    function dibujarEstrellaForma(x, y, r, llena) {
+      ctx.beginPath();
+      for (let i = 0; i < 10; i++) {
+        let radio = i % 2 === 0 ? r : r * 0.45;
+        let a = -Math.PI / 2 + i * Math.PI / 5;
+        ctx.lineTo(x + Math.cos(a) * radio, y + Math.sin(a) * radio);
+      }
+      ctx.closePath();
+      ctx.fillStyle = llena ? "#ffd600" : "rgba(0, 0, 0, 0.35)";
+      ctx.fill();
+      ctx.strokeStyle = llena ? "#795548" : "rgba(255, 255, 255, 0.5)";
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+
+    function dinero(n) {
+      return "L. " + n.toLocaleString("es-HN");
+    }
+
+    function dibujarHUD() {
+      let W = PW, H = PH;
+      let j = jugadorActual();
+
+      dibujarPanelPersonaje();
+
+      // Estrellas de la policía
+      for (let i = 0; i < 5; i++) {
+        let lleno = i < estrellas;
+        let parpadea = lleno && tiempoEscondido > 200 && Math.floor(cuadro / 10) % 2 === 0;
+        dibujarEstrellaForma(W - 150 + i * 28, 36, 12, lleno && !parpadea);
+      }
+      if (arresto > 0) {
+        ctx.font = "bold 18px Arial";
+        ctx.textAlign = "right";
+        texto("¡Te están agarrando! ¡Muévete!", W - 16, 72);
+        ctx.textAlign = "left";
+      }
+      dibujarRestoHUD(j, W, H);
+    }
+
+    // Personaje y dinero (arriba a la izquierda)
+    function dibujarPanelPersonaje() {
+      let j = jugadorActual();
+      ctx.fillStyle = "rgba(0, 0, 0, 0.45)";
+      rectRedondo(14, 14, 250, 74, 12);
+      ctx.fill();
+      ctx.save();
+      ctx.translate(50, 51);
+      ctx.scale(2, 2);
+      dibujarPersona(0, 0, -Math.PI / 2, 0, ropaDeProtagonista(activo));
+      ctx.restore();
+      ctx.font = "bold 22px Arial";
+      texto(PERSONAJES[activo].nombre, 90, 44);
+      ctx.font = "bold 20px Arial";
+      ctx.fillStyle = "#69f0ae";
+      ctx.fillText(dinero(j.dinero), 90, 72);
+    }
+
+    function dibujarRestoHUD(j, W, H) {
+      // Velocidad
+      if (j.carro) {
+        ctx.font = "bold 20px Arial";
+        ctx.textAlign = "right";
+        texto(Math.round(Math.abs(j.carro.vel) * 16) + " km/h", W - 20, H - 24);
+        ctx.textAlign = "left";
+      }
+
+      // Misión
+      if (misionActiva) {
+        let paso = misionActiva.m.pasos[misionActiva.paso];
+        let t = paso.texto;
+        if (paso.bus && !(j.carro && j.carro.tipo === "bus")) t += "  (necesitas tu bus: está en la Terminal)";
+        else if (paso.carro && !j.carro) t += "  (necesitas un carro)";
+        ctx.font = "bold 20px Arial";
+        let ancho = ctx.measureText(t).width + 40;
+        ctx.fillStyle = "rgba(0, 0, 0, 0.55)";
+        rectRedondo(W / 2 - ancho / 2, 14, ancho, 40, 10);
+        ctx.fill();
+        ctx.textAlign = "center";
+        ctx.fillStyle = "#ffeb3b";
+        ctx.fillText(t, W / 2, 41);
+        if (misionActiva.tiempo > 0) {
+          let s = Math.ceil(misionActiva.tiempo / 60);
+          ctx.font = "bold 26px Arial";
+          ctx.fillStyle = s <= 10 ? "#ff5252" : "white";
+          ctx.fillText(Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0"), W / 2, 86);
+        }
+        ctx.textAlign = "left";
+        if (vista3D) dibujarFlecha3D(paso);
+        else dibujarFlechaDestino(paso);
+      } else {
+        // ¿Hay una misión para empezar aquí?
+        let p = posJugador();
+        for (let m of MISIONES) {
+          if (m.personaje !== activo) continue;
+          let l = lugarPx(m.inicio);
+          if (Math.hypot(p.x - l.x, p.y - l.y) < 50) {
+            ctx.font = "bold 20px Arial";
+            ctx.textAlign = "center";
+            texto("Presiona E para empezar: " + m.nombre + (misionesHechas.includes(m.id) ? " (otra vez)" : ""), W / 2, H - 110);
+            ctx.textAlign = "left";
+          }
+        }
+        let casa = lugarPx(PERSONAJES[activo].casa);
+        if (!j.carro && Math.hypot(p.x - casa.x, p.y - casa.y) < 45) {
+          ctx.font = "bold 20px Arial";
+          ctx.textAlign = "center";
+          texto("Presiona E para entrar a tu casa", W / 2, H - 110);
+          ctx.textAlign = "left";
+        }
+      }
+
+      // Nombre del lugar
+      if (zonaCuadros > 0) {
+        ctx.globalAlpha = Math.min(1, zonaCuadros / 30);
+        ctx.font = "bold italic 30px Arial";
+        ctx.textAlign = "right";
+        texto(zonaActual, W - 20, H - 60);
+        ctx.textAlign = "left";
+        ctx.globalAlpha = 1;
+      }
+
+      dibujarMinimapa();
+      dibujarAviso();
+    }
+
+    // Aviso grande
+    function dibujarAviso() {
+      let W = PW, H = PH;
+      if (aviso) {
+        aviso.t--;
+        ctx.globalAlpha = Math.min(1, aviso.t / 30);
+        ctx.textAlign = "center";
+        ctx.font = "bold 40px Arial";
+        texto(aviso.titulo, W / 2, H * 0.28);
+        ctx.font = "22px Arial";
+        texto(aviso.texto, W / 2, H * 0.28 + 38);
+        ctx.textAlign = "left";
+        ctx.globalAlpha = 1;
+        if (aviso.t <= 0) aviso = null;
+      }
+    }
+
+    // Flecha en la orilla de la pantalla que apunta al destino
+    function dibujarFlechaDestino(paso) {
+      if (!paso.lugar) return;
+      let l = lugarPx(paso.lugar);
+      let esc = escalaBase() * zoom;
+      let sx = PW / 2 + (l.x - camX) * esc, sy = PH / 2 + (l.y - camY) * esc;
+      let margen = 60;
+      if (sx > margen && sx < PW - margen && sy > margen && sy < PH - margen) return;
+      let ang = Math.atan2(sy - PH / 2, sx - PW / 2);
+      let r = Math.min(PW, PH) / 2 - 50;
+      let ax = PW / 2 + Math.cos(ang) * r, ay = PH / 2 + Math.sin(ang) * r;
+      ctx.save();
+      ctx.translate(ax, ay);
+      ctx.rotate(ang);
+      ctx.fillStyle = "#ffeb3b";
+      ctx.strokeStyle = "#333";
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(22, 0); ctx.lineTo(-12, -16); ctx.lineTo(-4, 0); ctx.lineTo(-12, 16);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function puntitoMapa(x, y, color, r, letra) {
+      ctx.fillStyle = color;
+      ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = "rgba(0, 0, 0, 0.6)";
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      if (letra) {
+        ctx.fillStyle = "#111";
+        ctx.font = "bold " + Math.round(r * 1.3) + "px Arial";
+        ctx.textAlign = "center";
+        ctx.fillText(letra, x, y + r * 0.45);
+        ctx.textAlign = "left";
+      }
+    }
+
+    // Dibuja los puntitos (protagonistas, misión, policía) con una función que convierte posiciones
+    function dibujarPuntitos(aPantalla, r) {
+      for (let c of carros) if (c.tipo === "policia") {
+        let p = aPantalla(c.x, c.y);
+        puntitoMapa(p.x, p.y, Math.floor(cuadro / 8) % 2 ? "#ff1744" : "#2979ff", r * 0.7);
+      }
+      if (misionActiva) {
+        let paso = misionActiva.m.pasos[misionActiva.paso];
+        if (paso.lugar) { let l = lugarPx(paso.lugar), p = aPantalla(l.x, l.y); puntitoMapa(p.x, p.y, "#ffeb3b", r * 1.1); }
+      } else {
+        for (let m of MISIONES) if (m.personaje === activo) {
+          let l = lugarPx(m.inicio), p = aPantalla(l.x, l.y);
+          puntitoMapa(p.x, p.y, PERSONAJES[activo].color, r * 0.8, misionesHechas.includes(m.id) ? "✓" : "!");
+        }
+      }
+      for (let i = 0; i < PERSONAJES.length; i++) {
+        let c = lugarPx(PERSONAJES[i].casa), p = aPantalla(c.x, c.y);
+        puntitoMapa(p.x, p.y, "#ffffff", r * 0.7, "⌂");
+      }
+      for (let i = 0; i < PERSONAJES.length; i++) {
+        let pos = posJugador(i), p = aPantalla(pos.x, pos.y);
+        if (i === activo) {
+          // Flechita que muestra hacia dónde miras
+          let a = jugadores[i].carro ? jugadores[i].carro.ang : (vista3D ? mirarYaw : jugadores[i].ang);
+          ctx.fillStyle = "white";
+          ctx.beginPath();
+          ctx.moveTo(p.x + Math.cos(a) * r * 2.6, p.y + Math.sin(a) * r * 2.6);
+          ctx.lineTo(p.x + Math.cos(a + 2.5) * r * 1.3, p.y + Math.sin(a + 2.5) * r * 1.3);
+          ctx.lineTo(p.x + Math.cos(a - 2.5) * r * 1.3, p.y + Math.sin(a - 2.5) * r * 1.3);
+          ctx.fill();
+        }
+        puntitoMapa(p.x, p.y, PERSONAJES[i].camisa, i === activo ? r * 1.2 : r * 0.9, PERSONAJES[i].letra);
+      }
+    }
+
+    function dibujarMinimapa() {
+      let W = PW, H = PH;
+      let mw = Math.min(260, W * 0.25), mh = mw * 0.72;
+      let x0 = 16, y0 = H - mh - 16;
+      let p = posJugador();
+      let zoomMini = 1.6;   // pixeles del minimapa por cada 4 del lienzoMini
+      ctx.save();
+      rectRedondo(x0, y0, mw, mh, 12);
+      ctx.fillStyle = "#0d47a1";
+      ctx.fill();
+      ctx.clip();
+      let cx = p.x / T * MINI * zoomMini, cy = p.y / T * MINI * zoomMini;
+      ctx.drawImage(lienzoMini, x0 + mw / 2 - cx, y0 + mh / 2 - cy, lienzoMini.width * zoomMini, lienzoMini.height * zoomMini);
+      dibujarPuntitos((wx, wy) => ({ x: x0 + mw / 2 + (wx - p.x) / T * MINI * zoomMini, y: y0 + mh / 2 + (wy - p.y) / T * MINI * zoomMini }), 6);
+      ctx.restore();
+      ctx.strokeStyle = "white";
+      ctx.lineWidth = 3;
+      rectRedondo(x0, y0, mw, mh, 12);
+      ctx.stroke();
+      ctx.font = "12px Arial";
+      texto("M = mapa", x0 + 8, y0 - 6);
+    }
+
+    function dibujarMapaGrande() {
+      let W = PW, H = PH;
+      ctx.fillStyle = "rgba(0, 0, 0, 0.85)";
+      ctx.fillRect(0, 0, W, H);
+      let esc = Math.min((W - 80) / lienzoMini.width, (H - 120) / lienzoMini.height);
+      let mw = lienzoMini.width * esc, mh = lienzoMini.height * esc;
+      let x0 = (W - mw) / 2, y0 = 70;
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(lienzoMini, x0, y0, mw, mh);
+      ctx.imageSmoothingEnabled = true;
+      ctx.strokeStyle = "white";
+      ctx.lineWidth = 3;
+      ctx.strokeRect(x0, y0, mw, mh);
+
+      let aPantalla = (wx, wy) => ({ x: x0 + wx / T * MINI * esc, y: y0 + wy / T * MINI * esc });
+      // Nombres de lugares
+      ctx.font = "bold 14px Arial";
+      ctx.textAlign = "center";
+      const nombres = [["Camaroneras", 3.5, 21], ["Panamericana CA-1", 32, 4.8], ["Parque Central", 23.5, 25.5], ["Mercado", 33.5, 24],
+                       ["Escuela", 43.5, 16], ["Alcaldía", 33.5, 16], ["Hotel Morazán", 23.5, 16], ["Gasolinera", 23, 7.5],
+                       ["Puerto de Henecán", 56, 33], ["Paseo La Cabaña", 28, 38.8], ["Golfo de Fonseca", 30, 44], ["Bodegas", 56, 12], ["Terminal", 33.5, 33]];
+      for (let n of nombres) { let p = aPantalla(n[1] * T, n[2] * T); texto(n[0], p.x, p.y); }
+      ctx.textAlign = "left";
+      dibujarPuntitos(aPantalla, 9);
+
+      ctx.font = "bold 30px Arial";
+      ctx.textAlign = "center";
+      texto("San Lorenzo, Valle", W / 2, 48);
+      ctx.font = "16px Arial";
+      texto("F = El Flaco   W = Willito   C = El Chevez   Y = Yoni   ⌂ = casas   ! = misiones   amarillo = destino      (M o Backspace para cerrar)", W / 2, H - 20);
+      ctx.textAlign = "left";
+    }
+
+    function dibujarPanel(titulo, lineas) {
+      let W = PW, H = PH;
+      ctx.fillStyle = "rgba(0, 0, 0, 0.8)";
+      ctx.fillRect(0, 0, W, H);
+      ctx.textAlign = "center";
+      ctx.fillStyle = "white";
+      ctx.font = "bold 44px Arial";
+      ctx.fillText(titulo, W / 2, H / 2 - 40 - lineas.length * 16);
+      ctx.font = "22px Arial";
+      for (let i = 0; i < lineas.length; i++) ctx.fillText(lineas[i], W / 2, H / 2 - lineas.length * 16 + 10 + i * 34);
+      ctx.textAlign = "left";
+    }
+
+    const CONTROLES = [
+      "Flechas o W A S D: caminar / manejar",
+      "Shift: correr   ·   Espacio: freno de mano   ·   Q: bocina",
+      "E: subir o bajar del carro · empezar misión · entrar a tu casa",
+      "1, 2, 3, 4 o Tab: cambiar de personaje",
+      "V: primera persona 3D / vista de arriba   ·   Mouse (haz clic): mirar",
+      "M: mapa   ·   Backspace: menú de pausa"
+    ];
+
+    function dibujarMenu() {
+      let W = PW, H = PH;
+      ctx.fillStyle = "rgba(0, 0, 0, 0.75)";
+      ctx.fillRect(0, 0, W, H);
+      ctx.textAlign = "center";
+      ctx.fillStyle = "white";
+      ctx.font = "bold 48px Arial";
+      ctx.fillText("⏸ PAUSA", W / 2, H / 2 - 170);
+      ctx.font = "26px Arial";
+      for (let i = 0; i < OPCIONES_MENU.length; i++) {
+        let y = H / 2 - 90 + i * 56;
+        let apagada = i === 3 && !misionActiva;
+        if (i === opcionMenu) {
+          ctx.fillStyle = "rgba(255, 215, 0, 0.2)";
+          ctx.strokeStyle = "gold";
+          ctx.lineWidth = 2;
+          rectRedondo(W / 2 - 200, y - 34, 400, 48, 12);
+          ctx.fill();
+          ctx.stroke();
+          ctx.fillStyle = "gold";
+        } else {
+          ctx.fillStyle = apagada ? "#777" : "white";
+        }
+        ctx.fillText(OPCIONES_MENU[i], W / 2, y);
+      }
+      ctx.fillStyle = "#bbb";
+      ctx.font = "18px Arial";
+      ctx.fillText("↑ ↓ para moverte   ·   Enter para elegir   ·   Backspace para volver", W / 2, H / 2 + 200);
+      ctx.textAlign = "left";
+    }
+
+    function dibujarInicio() {
+      let W = PW, H = PH;
+      ctx.fillStyle = "rgba(0, 0, 0, 0.65)";
+      ctx.fillRect(0, 0, W, H);
+      ctx.textAlign = "center";
+      ctx.font = "bold 72px Arial";
+      ctx.fillStyle = "#ffeb3b";
+      ctx.lineWidth = 8;
+      ctx.strokeStyle = "#000";
+      ctx.strokeText("GTA DEL TEMU", W / 2, H * 0.17);
+      ctx.fillText("GTA DEL TEMU", W / 2, H * 0.17);
+      ctx.font = "italic 26px Arial";
+      ctx.fillStyle = "white";
+      ctx.fillText("San Lorenzo, Valle - Honduras", W / 2, H * 0.17 + 40);
+
+      // Los 4 protagonistas
+      let separacion = Math.min(270, W / 4.2);
+      for (let i = 0; i < PERSONAJES.length; i++) {
+        let x = W / 2 + (i - (PERSONAJES.length - 1) / 2) * separacion, y = H * 0.42;
+        ctx.fillStyle = "rgba(255, 255, 255, 0.1)";
+        rectRedondo(x - separacion / 2 + 8, y - 80, separacion - 16, 190, 16);
+        ctx.fill();
+        ctx.save();
+        ctx.translate(x, y - 10);
+        ctx.scale(3.4, 3.4);
+        dibujarPersona(0, 0, -Math.PI / 2 + Math.sin(cuadro * 0.03 + i) * 0.3, cuadro * 0.1, ropaDeProtagonista(i));
+        ctx.restore();
+        ctx.fillStyle = PERSONAJES[i].camisa;
+        ctx.font = "bold 26px Arial";
+        ctx.fillText(PERSONAJES[i].nombre, x, y + 70);
+        ctx.fillStyle = "#ddd";
+        ctx.font = "15px Arial";
+        ctx.fillText(PERSONAJES[i].descripcion, x, y + 94);
+      }
+
+      ctx.font = "18px Arial";
+      ctx.fillStyle = "white";
+      for (let i = 0; i < CONTROLES.length; i++) ctx.fillText(CONTROLES[i], W / 2, H * 0.64 + i * 25);
+      ctx.font = "bold 28px Arial";
+      ctx.fillStyle = Math.floor(cuadro / 30) % 2 ? "#ffeb3b" : "white";
+      ctx.fillText("Presiona Enter para jugar", W / 2, H * 0.64 + CONTROLES.length * 25 + 28);
+      ctx.textAlign = "left";
+    }
+
+    // 20b. DIBUJAR LA CASA POR DENTRO
+    function dibujarPisoCasa(l, x, y, I) {
+      let px = x * CELDA, py = y * CELDA, C = CELDA;
+      if (l === "m" || l === "p") {
+        // Tablas de madera
+        for (let i = 0; i < 4; i++) {
+          ctx.fillStyle = (x + i) % 2 ? "#b5814f" : "#a97443";
+          ctx.fillRect(px, py + i * 10, C, 10);
+          ctx.fillStyle = "rgba(0, 0, 0, 0.18)";
+          ctx.fillRect(px, py + i * 10 + 9, C, 1);
+          ctx.fillRect(px + ((x * 17 + i * 23) % C), py + i * 10, 1, 9);
+        }
+        if (l === "p") {
+          ctx.fillStyle = "#6d4c41";
+          rectRedondo(px + 4, py + 2, C - 8, 16, 3); ctx.fill();
+          ctx.strokeStyle = "#a1887f"; ctx.lineWidth = 1;
+          rectRedondo(px + 6, py + 4, C - 12, 12, 2); ctx.stroke();
+        }
+      } else if (l === "c") {
+        // Azulejo de cuadritos
+        for (let i = 0; i < 2; i++) for (let k = 0; k < 2; k++) {
+          ctx.fillStyle = (x * 2 + i + y * 2 + k) % 2 ? "#eceff1" : "#90a4ae";
+          ctx.fillRect(px + i * 20, py + k * 20, 20, 20);
+        }
+      } else if (l === "b") {
+        ctx.fillStyle = "#b3e5fc";
+        ctx.fillRect(px, py, C, C);
+        ctx.strokeStyle = "#81d4fa"; ctx.lineWidth = 1;
+        for (let i = 0; i <= C; i += 10) {
+          ctx.beginPath(); ctx.moveTo(px + i, py); ctx.lineTo(px + i, py + C); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(px, py + i); ctx.lineTo(px + C, py + i); ctx.stroke();
+        }
+      } else if (l === "a" || l === "k") {
+        // Alfombra suave
+        ctx.fillStyle = l === "a" ? PERSONAJES[I.casa].colorClaro : "#c5e1a5";
+        ctx.fillRect(px, py, C, C);
+        ctx.fillStyle = "rgba(0, 0, 0, 0.05)";
+        for (let i = 0; i < 6; i++) ctx.fillRect(px + ((x * 31 + i * 13) % 37), py + ((y * 17 + i * 11) % 37), 3, 3);
+      }
+    }
+
+    function dibujarMueble(m, I) {
+      let x = m.x * CELDA, y = m.y * CELDA, w = m.w * CELDA, h = m.h * CELDA;
+      let colorCasa = PERSONAJES[I.casa].color;
+      if (!m.piso) {
+        ctx.fillStyle = "rgba(0, 0, 0, 0.22)";
+        rectRedondo(x + 4, y + 5, w, h, 5); ctx.fill();
+      }
+      switch (m.tipo) {
+        case "cama": case "camita": {
+          ctx.fillStyle = "#6d4c41"; rectRedondo(x, y, w, h, 5); ctx.fill();
+          ctx.fillStyle = "#fafafa"; rectRedondo(x + 4, y + 4, w - 8, h - 8, 4); ctx.fill();
+          ctx.fillStyle = "#ffffff";
+          ctx.strokeStyle = "#cfd8dc"; ctx.lineWidth = 1;
+          let almohadas = m.tipo === "cama" ? 2 : 1, aw = (w - 12 - (almohadas - 1) * 4) / almohadas;
+          for (let i = 0; i < almohadas; i++) { rectRedondo(x + 6 + i * (aw + 4), y + 7, aw, 18, 6); ctx.fill(); ctx.stroke(); }
+          ctx.fillStyle = m.color || colorCasa;
+          rectRedondo(x + 4, y + h * 0.36, w - 8, h * 0.64 - 4, 4); ctx.fill();
+          ctx.fillStyle = "rgba(255, 255, 255, 0.35)";
+          ctx.fillRect(x + 4, y + h * 0.36, w - 8, 5);
+          ctx.fillStyle = "rgba(0, 0, 0, 0.12)";
+          for (let i = 1; i < 4; i++) ctx.fillRect(x + 4, y + h * 0.36 + i * (h * 0.16), w - 8, 2);
+          break;
+        }
+        case "mesita":
+          ctx.fillStyle = "#8d6e63"; rectRedondo(x, y, w, h, 3); ctx.fill();
+          ctx.fillStyle = "rgba(255, 236, 179, 0.35)";
+          ctx.beginPath(); ctx.arc(x + w / 2, y + h / 2, 24, 0, Math.PI * 2); ctx.fill();
+          ctx.fillStyle = "#fff8e1"; ctx.strokeStyle = "#bcaaa4"; ctx.lineWidth = 2;
+          ctx.beginPath(); ctx.arc(x + w / 2, y + h / 2, 8, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+          break;
+        case "ropero":
+          ctx.fillStyle = "#795548"; rectRedondo(x, y, w, h, 3); ctx.fill();
+          ctx.fillStyle = "#8d6e63"; ctx.fillRect(x + 3, y + 3, w / 2 - 4, h - 6); ctx.fillRect(x + w / 2 + 1, y + 3, w / 2 - 4, h - 6);
+          ctx.fillStyle = "#ffd54f";
+          ctx.beginPath(); ctx.arc(x + w / 2 - 4, y + h - 9, 2, 0, Math.PI * 2); ctx.arc(x + w / 2 + 4, y + h - 9, 2, 0, Math.PI * 2); ctx.fill();
+          break;
+        case "inodoro":
+          ctx.fillStyle = "#eceff1"; rectRedondo(x + 3, y, w - 6, h * 0.32, 3); ctx.fill();
+          ctx.fillStyle = "#fafafa";
+          ctx.beginPath(); ctx.ellipse(x + w / 2, y + h * 0.64, w * 0.4, h * 0.36, 0, 0, Math.PI * 2); ctx.fill();
+          ctx.strokeStyle = "#b0bec5"; ctx.lineWidth = 1.5; ctx.stroke();
+          ctx.fillStyle = "#b3e5fc";
+          ctx.beginPath(); ctx.ellipse(x + w / 2, y + h * 0.66, w * 0.24, h * 0.22, 0, 0, Math.PI * 2); ctx.fill();
+          break;
+        case "lavamanos":
+          ctx.fillStyle = "#fafafa"; rectRedondo(x, y, w, h, 8); ctx.fill();
+          ctx.strokeStyle = "#b0bec5"; ctx.lineWidth = 1.5; ctx.stroke();
+          ctx.fillStyle = "#b3e5fc";
+          ctx.beginPath(); ctx.ellipse(x + w / 2, y + h / 2 + 2, w * 0.3, h * 0.28, 0, 0, Math.PI * 2); ctx.fill();
+          ctx.fillStyle = "#9e9e9e"; ctx.fillRect(x + w - 8, y + h / 2 - 2, 7, 4);
+          break;
+        case "ducha":
+          ctx.fillStyle = "#e1f5fe"; ctx.fillRect(x, y, w, h);
+          ctx.strokeStyle = "#b3e5fc"; ctx.lineWidth = 1;
+          for (let i = 8; i < w; i += 8) { ctx.beginPath(); ctx.moveTo(x + i, y); ctx.lineTo(x + i, y + h); ctx.stroke(); }
+          ctx.fillStyle = "#90a4ae";
+          ctx.beginPath(); ctx.arc(x + w / 2, y + h / 2, 4, 0, Math.PI * 2); ctx.fill();
+          ctx.fillStyle = "#b0bec5";
+          ctx.beginPath(); ctx.arc(x + w - 10, y + 10, 6, 0, Math.PI * 2); ctx.fill();
+          // Cortina
+          ctx.strokeStyle = "rgba(240, 98, 146, 0.85)"; ctx.lineWidth = 4;
+          ctx.beginPath();
+          for (let i = 0; i <= h; i += 4) ctx.lineTo(x + 2 + Math.sin(i * 0.5) * 2, y + i);
+          ctx.stroke();
+          if (I.ducha > 0) {
+            ctx.strokeStyle = "rgba(41, 182, 246, 0.8)"; ctx.lineWidth = 1.5;
+            for (let i = 0; i < 18; i++) {
+              let gx = x + 8 + Math.random() * (w - 14), gy = y + 6 + Math.random() * (h - 14);
+              ctx.beginPath(); ctx.moveTo(gx, gy); ctx.lineTo(gx - 1, gy + 6); ctx.stroke();
+            }
+          }
+          break;
+        case "refri":
+          ctx.fillStyle = "#eceff1"; rectRedondo(x, y, w, h, 4); ctx.fill();
+          ctx.strokeStyle = "#90a4ae"; ctx.lineWidth = 1.5; ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(x, y + h * 0.35); ctx.lineTo(x + w, y + h * 0.35); ctx.stroke();
+          ctx.fillStyle = "#78909c"; ctx.fillRect(x + w - 8, y + h * 0.45, 3, h * 0.35);
+          ctx.fillStyle = "#e53935"; ctx.fillRect(x + 8, y + h * 0.55, 6, 6);
+          ctx.fillStyle = "#fdd835"; ctx.fillRect(x + 16, y + h * 0.65, 5, 5);
+          break;
+        case "estufa": {
+          ctx.fillStyle = "#424242"; rectRedondo(x, y, w, h, 3); ctx.fill();
+          let prendida = I.estufa > 0;
+          for (let i = 0; i < 2; i++) for (let k = 0; k < 2; k++) {
+            let bx = x + w * (0.27 + i * 0.46), by = y + h * (0.3 + k * 0.42);
+            if (prendida) {
+              ctx.fillStyle = "rgba(255, " + (120 + Math.floor(Math.random() * 80)) + ", 0, 0.9)";
+              ctx.beginPath(); ctx.arc(bx, by, 6, 0, Math.PI * 2); ctx.fill();
+            }
+            ctx.strokeStyle = "#9e9e9e"; ctx.lineWidth = 2;
+            ctx.beginPath(); ctx.arc(bx, by, 6, 0, Math.PI * 2); ctx.stroke();
+          }
+          if (prendida) {
+            // Olla de frijoles con vapor
+            ctx.fillStyle = "#b0bec5";
+            ctx.beginPath(); ctx.arc(x + w * 0.27, y + h * 0.3, 9, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = "#4e342e";
+            ctx.beginPath(); ctx.arc(x + w * 0.27, y + h * 0.3, 6.5, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = "rgba(255, 255, 255, 0.35)";
+            for (let i = 0; i < 3; i++) {
+              let v = (cuadro * 0.4 + i * 9) % 26;
+              ctx.beginPath(); ctx.arc(x + w * 0.27 + Math.sin(cuadro * 0.1 + i) * 4, y + h * 0.3 - v, 4 + v * 0.15, 0, Math.PI * 2); ctx.fill();
+            }
+          }
+          break;
+        }
+        case "meson":
+          ctx.fillStyle = "#d7ccc8"; rectRedondo(x, y, w, h, 3); ctx.fill();
+          ctx.fillStyle = "#a1887f"; ctx.fillRect(x, y + h - 4, w, 4);
+          ctx.fillStyle = "#90a4ae"; rectRedondo(x + w * 0.55, y + 5, w * 0.32, h - 13, 3); ctx.fill();
+          ctx.fillStyle = "#607d8b"; ctx.fillRect(x + w * 0.71 - 2, y + 2, 4, 6);
+          // Un racimo de guineos
+          ctx.fillStyle = "#fdd835";
+          for (let i = 0; i < 3; i++) { ctx.beginPath(); ctx.ellipse(x + 14 + i * 5, y + h / 2, 3, 8, 0.3, 0, Math.PI * 2); ctx.fill(); }
+          break;
+        case "mesa":
+          ctx.fillStyle = "#8d6e63";
+          for (let i = 0; i < 2; i++) {
+            ctx.fillRect(x + w * (0.2 + i * 0.45), y - 10, 13, 9);
+            ctx.fillRect(x + w * (0.2 + i * 0.45), y + h + 1, 13, 9);
+          }
+          ctx.fillStyle = "#a1887f"; rectRedondo(x, y, w, h, 4); ctx.fill();
+          ctx.strokeStyle = "#6d4c41"; ctx.lineWidth = 2; ctx.stroke();
+          ctx.fillStyle = "#fafafa";
+          ctx.beginPath(); ctx.arc(x + w * 0.27, y + h / 2, 7, 0, Math.PI * 2); ctx.arc(x + w * 0.73, y + h / 2, 7, 0, Math.PI * 2); ctx.fill();
+          ctx.fillStyle = "#ff7043";
+          ctx.beginPath(); ctx.arc(x + w / 2, y + h / 2, 4, 0, Math.PI * 2); ctx.fill();
+          break;
+        case "alfombra":
+          ctx.fillStyle = "#8d3b2f"; rectRedondo(x, y, w, h, 6); ctx.fill();
+          ctx.strokeStyle = "#fbc02d"; ctx.lineWidth = 3;
+          rectRedondo(x + 7, y + 7, w - 14, h - 14, 4); ctx.stroke();
+          ctx.fillStyle = "#26a69a";
+          ctx.beginPath();
+          ctx.moveTo(x + w / 2, y + 16); ctx.lineTo(x + w - 18, y + h / 2); ctx.lineTo(x + w / 2, y + h - 16); ctx.lineTo(x + 18, y + h / 2);
+          ctx.closePath(); ctx.fill();
+          break;
+        case "tele": {
+          ctx.fillStyle = "#5d4037"; ctx.fillRect(x - 4, y - 6, w + 6, h + 12);
+          ctx.fillStyle = "#111"; ctx.fillRect(x + w - 8, y, 7, h);
+          if (I.tele) {
+            let tono = (I.canal * 70 + Math.floor(cuadro / 12) * 25) % 360;
+            ctx.fillStyle = "hsl(" + tono + ", 70%, 60%)";
+            ctx.fillRect(x + w - 2, y + 3, 2, h - 6);
+          }
+          break;
+        }
+        case "mesitaCentro":
+          ctx.fillStyle = "#6d4c41"; rectRedondo(x, y, w, h, 4); ctx.fill();
+          ctx.fillStyle = "rgba(178, 235, 242, 0.6)"; rectRedondo(x + 4, y + 4, w - 8, h - 8, 3); ctx.fill();
+          ctx.fillStyle = "#fafafa";
+          ctx.beginPath(); ctx.arc(x + w * 0.65, y + h * 0.35, 5, 0, Math.PI * 2); ctx.fill();
+          ctx.fillStyle = "#4e342e";
+          ctx.beginPath(); ctx.arc(x + w * 0.65, y + h * 0.35, 3.2, 0, Math.PI * 2); ctx.fill();
+          break;
+        case "sofa":
+          ctx.fillStyle = "#5d4037"; rectRedondo(x, y, w, h, 7); ctx.fill();
+          ctx.fillStyle = "#8d6e63";
+          for (let i = 0; i < 2; i++) { rectRedondo(x + 3, y + 7 + i * (h - 14) / 2, w - 15, (h - 14) / 2 - 2, 5); ctx.fill(); }
+          ctx.fillStyle = colorCasa;
+          rectRedondo(x + w - 20, y + 10, 10, 14, 3); ctx.fill();
+          break;
+        case "hamaca": {
+          let meneo = I.sentado === m ? Math.sin(cuadro * 0.05) * 5 : Math.sin(cuadro * 0.02) * 1.5;
+          let cy = y + h / 2 + meneo;
+          ctx.strokeStyle = "#5d4037"; ctx.lineWidth = 2;
+          ctx.beginPath(); ctx.moveTo(x, y + h / 2); ctx.lineTo(x + 26, cy); ctx.moveTo(x + w, y + h / 2); ctx.lineTo(x + w - 26, cy); ctx.stroke();
+          ctx.fillStyle = "#5d4037";
+          ctx.beginPath(); ctx.arc(x, y + h / 2, 4, 0, Math.PI * 2); ctx.arc(x + w, y + h / 2, 4, 0, Math.PI * 2); ctx.fill();
+          ctx.save();
+          ctx.beginPath(); ctx.ellipse(x + w / 2, cy, w / 2 - 26, h / 2 + 4, 0, 0, Math.PI * 2); ctx.clip();
+          let rayas = ["#e53935", "#fdd835", "#43a047", "#1e88e5", "#fb8c00"];
+          for (let i = 0; i < 10; i++) {
+            ctx.fillStyle = rayas[i % rayas.length];
+            ctx.fillRect(x + 26 + i * (w - 52) / 10, cy - h, (w - 52) / 10 + 1, h * 2);
+          }
+          ctx.restore();
+          break;
+        }
+        case "planta":
+          ctx.fillStyle = "#a1887f";
+          ctx.beginPath(); ctx.arc(x + w / 2, y + h / 2, w / 2, 0, Math.PI * 2); ctx.fill();
+          for (let i = 0; i < 7; i++) {
+            let a = i * Math.PI * 2 / 7 + Math.sin(cuadro * 0.02 + i) * 0.05;
+            ctx.fillStyle = i % 2 ? "#2e7d32" : "#43a047";
+            ctx.beginPath(); ctx.ellipse(x + w / 2 + Math.cos(a) * 9, y + h / 2 + Math.sin(a) * 9, 11, 5, a, 0, Math.PI * 2); ctx.fill();
+          }
+          break;
+        case "pelota":
+          ctx.fillStyle = "#fafafa";
+          ctx.beginPath(); ctx.arc(x + w / 2, y + h / 2, w / 2, 0, Math.PI * 2); ctx.fill();
+          ctx.fillStyle = "#e53935";
+          ctx.beginPath(); ctx.arc(x + w / 2, y + h / 2, w / 2, 0, Math.PI); ctx.fill();
+          break;
+      }
+    }
+
+    // Adentro de la casa la gente se dibuja más grande (para que vaya con los muebles)
+    const TAMAÑO_CASA = 1.5;
+    function personaCasa(x, y, ang, paso, ropa) {
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.scale(TAMAÑO_CASA, TAMAÑO_CASA);
+      dibujarPersona(0, 0, ang, paso, ropa);
+      ctx.restore();
+    }
+
+    function dibujarCasa() {
+      let I = interior, W = PW, H = PH, C = CELDA;
+      let anchoPx = I.ancho * C, altoPx = I.alto * C;
+      let s = Math.min((W - 60) / anchoPx, (H - 170) / altoPx);
+      let ox = W / 2 - anchoPx * s / 2, oy = (H - altoPx * s) / 2 + 30;
+      ctx.fillStyle = "#151515";
+      ctx.fillRect(0, 0, W, H);
+      ctx.setTransform(RES * s, 0, 0, RES * s, RES * ox, RES * oy);
+
+      // Piso
+      for (let y = 0; y < I.alto; y++)
+        for (let x = 0; x < I.ancho; x++)
+          if (I.plano[y][x] !== "#") dibujarPisoCasa(I.plano[y][x], x, y, I);
+
+      // Luz que entra por las ventanas
+      for (let v of I.ventanas) {
+        let y0 = v.dir > 0 ? (v.y + 1) * C : v.y * C;
+        let g = ctx.createLinearGradient(0, y0, 0, y0 + v.dir * C * 2.2);
+        g.addColorStop(0, "rgba(255, 244, 200, 0.35)");
+        g.addColorStop(1, "rgba(255, 244, 200, 0)");
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.moveTo(v.x * C, y0); ctx.lineTo((v.x + v.w) * C, y0);
+        ctx.lineTo((v.x + v.w + 0.5) * C, y0 + v.dir * C * 2.2); ctx.lineTo((v.x + 0.5) * C, y0 + v.dir * C * 2.2);
+        ctx.closePath(); ctx.fill();
+      }
+
+      // Luz de la tele en el piso
+      if (I.tele) {
+        let t = I.muebles.find(m => m.accion === "tele");
+        let tx = (t.x + t.w) * C, ty = (t.y + t.h / 2) * C;
+        let g = ctx.createRadialGradient(tx, ty, 5, tx, ty, 130);
+        let parpadeo = 0.18 + Math.random() * 0.06;
+        g.addColorStop(0, "rgba(140, 200, 255, " + parpadeo + ")");
+        g.addColorStop(1, "rgba(140, 200, 255, 0)");
+        ctx.fillStyle = g;
+        ctx.fillRect(tx, ty - 130, 130, 260);
+      }
+
+      // Muebles: primero los del piso (alfombra, hamaca), luego los demás
+      for (let m of I.muebles) if (m.piso && m.tipo !== "hamaca") dibujarMueble(m, I);
+      for (let m of I.muebles) if (!m.piso) dibujarMueble(m, I);
+
+      // Personas (de arriba hacia abajo, para que se tapen bien)
+      let personas = I.gente.map(g => ({ o: g, ropa: ROPA_FAMILIA[g.quien] }));
+      let enHamaca = I.sentado && I.sentado.tipo === "hamaca";
+      if (!enHamaca) personas.push({ o: I.yo, ropa: ropaDeProtagonista(I.casa) });
+      personas.sort((a, b) => a.o.y - b.o.y);
+      for (let p of personas) {
+        let quieto = p.o === I.yo && I.sentado;
+        personaCasa(p.o.x, p.o.y, p.o.ang, quieto ? 0 : p.o.paso, p.ropa);
+      }
+      // Hamaca (y si estás acostado en ella, tú encima meciéndote)
+      dibujarMueble(I.muebles.find(m => m.tipo === "hamaca"), I);
+      if (enHamaca) personaCasa(I.yo.x, I.yo.y + Math.sin(cuadro * 0.05) * 5, I.yo.ang, 0, ropaDeProtagonista(I.casa));
+      // Cobija encima del que duerme
+      if (I.sentado && I.sentado.tipo === "cama") {
+        let m = I.sentado;
+        ctx.fillStyle = PERSONAJES[I.casa].color;
+        rectRedondo(m.x * C + 4, (m.y + 1.2) * C, m.w * C - 8, (m.h - 1.2) * C - 4, 4); ctx.fill();
+        ctx.fillStyle = "rgba(255, 255, 255, 0.35)";
+        ctx.fillRect(m.x * C + 4, (m.y + 1.2) * C, m.w * C - 8, 5);
+      }
+      if (I.dormir > 0 && I.dormir % 60 < 40) {
+        ctx.fillStyle = "white";
+        ctx.font = "bold 16px Arial";
+        let z = (180 - I.dormir) % 60;
+        ctx.fillText("z", I.yo.x + 12 + z * 0.3, I.yo.y - 10 - z * 0.4);
+        ctx.fillText("Z", I.yo.x + 20 + z * 0.4, I.yo.y - 24 - z * 0.4);
+      }
+
+      // Paredes: con sombrita en el piso de al lado
+      for (let y = 0; y < I.alto; y++) {
+        for (let x = 0; x < I.ancho; x++) {
+          if (I.plano[y][x] !== "#") continue;
+          ctx.fillStyle = "#e8dcc8";
+          ctx.fillRect(x * C, y * C, C, C);
+          ctx.fillStyle = "rgba(0, 0, 0, 0.13)";
+          let abajo = I.plano[y + 1] && I.plano[y + 1][x], derecha = I.plano[y][x + 1];
+          if (abajo && abajo !== "#") ctx.fillRect(x * C, (y + 1) * C, C, 7);
+          if (derecha && derecha !== "#") ctx.fillRect((x + 1) * C, y * C, 6, C);
+          ctx.fillStyle = "#c8b89e";
+          if (abajo && abajo !== "#") ctx.fillRect(x * C, (y + 1) * C - 3, C, 3);
+        }
+      }
+      // Ventanas en la pared
+      for (let v of I.ventanas) {
+        ctx.fillStyle = "#81d4fa";
+        ctx.fillRect(v.x * C, v.y * C + 15, v.w * C, 10);
+        ctx.strokeStyle = "#6d4c41"; ctx.lineWidth = 2;
+        ctx.strokeRect(v.x * C, v.y * C + 15, v.w * C, 10);
+        ctx.beginPath(); ctx.moveTo((v.x + v.w / 2) * C, v.y * C + 15); ctx.lineTo((v.x + v.w / 2) * C, v.y * C + 25); ctx.stroke();
+      }
+      // El cuadro colgado en la sala
+      ctx.fillStyle = "#6d4c41";
+      ctx.fillRect(5 * C, 5 * C + 4, 1.6 * C, C - 10);
+      ctx.fillStyle = "#fffde7";
+      ctx.fillRect(5 * C + 4, 5 * C + 8, 1.6 * C - 8, C - 18);
+      ctx.font = "16px Arial";
+      ctx.textAlign = "center";
+      ctx.fillText(MARCO_CASA[I.casa], 5.8 * C, 5 * C + 27);
+      ctx.textAlign = "left";
+      // Marco de la puerta de salida
+      ctx.fillStyle = "#4e342e";
+      ctx.fillRect(I.puerta.x - C / 2 - 4, I.puerta.y, 4, C);
+      ctx.fillRect(I.puerta.x + C / 2, I.puerta.y, 4, C);
+      // Orilla de la casa con el color del dueño
+      ctx.strokeStyle = PERSONAJES[I.casa].color;
+      ctx.lineWidth = 6;
+      ctx.strokeRect(-3, -3, anchoPx + 6, altoPx + 6);
+
+      for (let b of burbujas) if (b.obj.dentro) dibujarBurbuja(b);
+
+      // Ya fuera de la casa: textos de la pantalla
+      ctx.setTransform(RES, 0, 0, RES, 0, 0);
+      if (I.dormir > 0) {
+        ctx.fillStyle = "rgba(0, 0, 20, " + (Math.sin(Math.PI * (180 - I.dormir) / 180) * 0.92) + ")";
+        ctx.fillRect(0, 0, W, H);
+      }
+      dibujarPanelPersonaje();
+      ctx.textAlign = "center";
+      ctx.font = "bold 28px Arial";
+      texto("🏠 " + PERSONAJES[I.casa].nombreCasa, W / 2, 46);
+      if (I.cerca && I.dormir === 0) {
+        ctx.font = "bold 20px Arial";
+        texto((I.sentado ? "Presiona E o muévete para " : "Presiona E para ") + I.cerca.texto, W / 2, H - 30);
+      }
+      ctx.textAlign = "right";
+      ctx.font = "16px Arial";
+      ctx.fillStyle = "#bbb";
+      ctx.fillText("Sal por la puerta de abajo para volver a la calle", W - 20, 40);
+      ctx.textAlign = "left";
+      dibujarAviso();
+
+      // Fundido a negro al entrar y al salir
+      let negro = Math.max(I.fundido / 30, I.saliendo ? 1 - I.saliendo / 20 : 0);
+      if (negro > 0) {
+        ctx.fillStyle = "rgba(0, 0, 0, " + negro + ")";
+        ctx.fillRect(0, 0, W, H);
+      }
+    }
+
+    // 21. DIBUJAR TODO
+    function dibujar() {
+      ctx.setTransform(RES, 0, 0, RES, 0, 0);
+      let en3D = vista3D && mundo3D && estado !== "inicio" && estado !== "casa";
+      lienzo3D.style.display = en3D ? "block" : "none";
+
+      if (estado === "casa") {
+        dibujarCasa();
+        return;
+      }
+
+      if (estado === "inicio") {
+        ctx.fillStyle = "#1565c0";
+        ctx.fillRect(0, 0, PW, PH);
+        // De fondo, la cámara pasea sobre el parque central
+        let cx = 23.5 * T + Math.sin(cuadro * 0.003) * 600, cy = 24 * T + Math.cos(cuadro * 0.004) * 300;
+        dibujarMundo(cx, cy, escalaBase() * 0.8);
+        ctx.setTransform(RES, 0, 0, RES, 0, 0);
+        dibujarInicio();
+        return;
+      }
+
+      if (en3D) {
+        // El mundo en 3D se dibuja en el otro lienzo; en este solo van los textos
+        dibujar3D();
+        ctx.clearRect(0, 0, PW, PH);
+        dibujarEtiquetas3D();
+        if (estado !== "cambiando") {
+          if (jugadorActual().carro) dibujarVolante();
+          else {
+            ctx.fillStyle = "rgba(255, 255, 255, 0.8)";
+            ctx.beginPath(); ctx.arc(PW / 2, PH / 2, 3, 0, Math.PI * 2); ctx.fill();
+          }
+          dibujarHUD();
+        } else {
+          ctx.fillStyle = "rgba(0, 0, 0, " + Math.sin(Math.PI * transicion.t / 80) + ")";
+          ctx.fillRect(0, 0, PW, PH);
+        }
+      } else {
+        ctx.fillStyle = "#1565c0";
+        ctx.fillRect(0, 0, PW, PH);
+        dibujarMundo(camX, camY, escalaBase() * zoom);
+        ctx.setTransform(RES, 0, 0, RES, 0, 0);
+        if (estado !== "cambiando") dibujarHUD();
+      }
+
+      if (estado === "menu") dibujarMenu();
+      if (estado === "mapa") dibujarMapaGrande();
+      if (estado === "controles") dibujarPanel("🎮 Controles", CONTROLES.concat(["", "Presiona Enter para volver"]));
+      if (estado === "cambiando") {
+        ctx.textAlign = "center";
+        ctx.font = "bold 40px Arial";
+        texto("Cambiando a " + PERSONAJES[transicion.hacia].nombre + "...", PW / 2, PH / 2);
+        ctx.textAlign = "left";
+      }
+    }
+
+    // 22. PRIMERA PERSONA EN 3D (usa la librería three.js)
+    // Se arma una copia en 3D de la misma ciudad: el piso es el mismo mapa de arriba,
+    // y encima se ponen edificios, árboles, carros y personas en 3D.
+    const lienzo3D = document.getElementById("juego3d");
+    let vista3D = false;
+    let mundo3D = null;
+    let mirarYaw = 0, mirarPitch = 0;   // hacia dónde miras (izquierda-derecha y arriba-abajo)
+    let mirarLado = 0;                  // mirar a los lados mientras manejas
+    let volante = 0;                    // cuánto está girado el volante
+
+    function hay3D() {
+      return typeof THREE !== "undefined";
+    }
+
+    function alternarVista() {
+      if (!hay3D()) {
+        mostrarAviso("No se pudo cargar el 3D", "La primera persona necesita internet la primera vez", 220);
+        return;
+      }
+      if (!mundo3D) construir3D();
+      vista3D = !vista3D;
+      let j = jugadorActual();
+      mirarYaw = j.carro ? j.carro.ang : j.ang;
+      mirarPitch = 0;
+      mirarLado = 0;
+      if (!vista3D && document.pointerLockElement) document.exitPointerLock();
+      mostrarAviso(vista3D ? "Primera persona" : "Vista desde arriba",
+                   vista3D ? "← → para girar · haz clic para mirar con el mouse" : "", 180);
+    }
+
+    // Mirar con el mouse (después de hacer clic en el juego)
+    document.addEventListener("mousemove", function (e) {
+      if (!vista3D || document.pointerLockElement !== document.body) return;
+      if (jugadorActual().carro) mirarLado = Math.max(-1.3, Math.min(1.3, mirarLado + e.movementX * 0.0025));
+      else mirarYaw += e.movementX * 0.0025;
+      mirarPitch = Math.max(-1.1, Math.min(1.1, mirarPitch - e.movementY * 0.0025));
+    });
+    document.addEventListener("click", function () {
+      if (vista3D && estado === "jugando" && document.pointerLockElement !== document.body) {
+        try { document.body.requestPointerLock(); } catch (e) {}
+      }
+    });
+
+    // Caminar en primera persona: W/S adelante y atrás, A/D de lado, ← → girar
+    function caminar3D(j) {
+      let giro = (tecla("ArrowRight") ? 1 : 0) - (tecla("ArrowLeft") ? 1 : 0);
+      mirarYaw += giro * 0.045;
+      j.ang = mirarYaw;
+      let adelante = (tecla("KeyW", "ArrowUp") ? 1 : 0) - (tecla("KeyS", "ArrowDown") ? 1 : 0);
+      let lado = (tecla("KeyD") ? 1 : 0) - (tecla("KeyA") ? 1 : 0);
+      if (adelante === 0 && lado === 0) return;
+      let fx = Math.cos(mirarYaw), fy = Math.sin(mirarYaw);
+      let dx = fx * adelante - fy * lado, dy = fy * adelante + fx * lado;
+      let largo = Math.hypot(dx, dy);
+      let vel = tecla("ShiftLeft", "ShiftRight") ? PERSONAJES[activo].correr : 2.2;
+      let nx = j.x + dx / largo * vel, ny = j.y + dy / largo * vel;
+      if (!solidoPie(nx, j.y)) j.x = nx;
+      if (!solidoPie(j.x, ny)) j.y = ny;
+      j.paso += vel * 0.12;
+      for (let c of carros) {
+        let d = Math.hypot(j.x - c.x, j.y - c.y);
+        if (d < 26 && d > 0) {
+          let ex = j.x + (j.x - c.x) / d * (26 - d), ey = j.y + (j.y - c.y) / d * (26 - d);
+          if (!solidoPie(ex, ey)) { j.x = ex; j.y = ey; }
+        }
+      }
+    }
+
+    // --- Materiales y texturas ---
+    const cacheMateriales = {};
+    function mat(color, tipo, extra) {
+      let clave = color + (tipo || "") + JSON.stringify(extra || {});
+      if (!cacheMateriales[clave]) {
+        let opciones = Object.assign({ color: color }, extra || {});
+        cacheMateriales[clave] = tipo === "brillo" ? new THREE.MeshPhongMaterial(Object.assign({ shininess: 70, specular: 0x555555 }, opciones))
+                               : tipo === "plano" ? new THREE.MeshPhongMaterial(Object.assign({ flatShading: true, shininess: 5 }, opciones))
+                               : new THREE.MeshLambertMaterial(opciones);
+      }
+      return cacheMateriales[clave];
+    }
+
+    function lienzoTextura(w, h, dibujo) {
+      let c = document.createElement("canvas");
+      c.width = w;
+      c.height = h;
+      dibujo(c.getContext("2d"), w, h);
+      let t = new THREE.CanvasTexture(c);
+      t.wrapS = t.wrapT = THREE.RepeatWrapping;
+      t.anisotropy = 8;
+      return t;
+    }
+
+    // Pared de edificio con ventanas
+    const cacheFachadas = {};
+    function fachada(color, tipo) {
+      let clave = color + tipo;
+      if (!cacheFachadas[clave]) {
+        cacheFachadas[clave] = lienzoTextura(128, 128, (g, w, h) => {
+          g.fillStyle = color;
+          g.fillRect(0, 0, w, h);
+          g.fillStyle = "rgba(0, 0, 0, 0.08)";
+          for (let i = 0; i < 40; i++) g.fillRect(Math.random() * w, Math.random() * h, 3, 3);
+          if (tipo === "edificio") {
+            for (let fx = 0; fx < 2; fx++) for (let fy = 0; fy < 2; fy++) {
+              let x = 12 + fx * 64, y = 14 + fy * 64;
+              g.fillStyle = "#e0e0e0"; g.fillRect(x - 3, y - 3, 46, 42);
+              let vidrio = g.createLinearGradient(x, y, x + 40, y + 36);
+              vidrio.addColorStop(0, "#90caf9"); vidrio.addColorStop(1, "#1e3a5f");
+              g.fillStyle = vidrio; g.fillRect(x, y, 40, 36);
+              g.fillStyle = "#e0e0e0"; g.fillRect(x + 19, y, 2, 36);
+            }
+          } else {
+            // casa: una ventana con marco y una puerta a un lado
+            g.fillStyle = "#fafafa"; g.fillRect(14, 30, 48, 42);
+            let vidrio = g.createLinearGradient(18, 34, 58, 68);
+            vidrio.addColorStop(0, "#b3e5fc"); vidrio.addColorStop(1, "#37474f");
+            g.fillStyle = vidrio; g.fillRect(18, 34, 40, 34);
+            g.fillStyle = "#fafafa"; g.fillRect(37, 34, 2, 34);
+            g.fillStyle = "#6d4c41"; g.fillRect(80, 40, 34, 88);
+            g.fillStyle = "#ffd54f"; g.fillRect(106, 84, 4, 4);
+            g.fillStyle = "rgba(0, 0, 0, 0.15)"; g.fillRect(0, 118, w, 10);
+          }
+        });
+      }
+      let t = cacheFachadas[clave].clone();
+      t.needsUpdate = true;
+      return t;
+    }
+
+    function letrero3D(escena, texto, x, y, z, ancho) {
+      let t = lienzoTextura(512, 110, (g, w, h) => {
+        g.fillStyle = "rgba(0, 0, 0, 0.55)";
+        g.fillRect(6, 10, w - 12, h - 20);
+        let tam = 58;
+        g.font = "bold " + tam + "px Arial";
+        while (g.measureText(texto).width > w - 40 && tam > 20) { tam -= 4; g.font = "bold " + tam + "px Arial"; }
+        g.textAlign = "center";
+        g.textBaseline = "middle";
+        g.fillStyle = "white";
+        g.fillText(texto, w / 2, h / 2 + 2);
+      });
+      let s = new THREE.Sprite(new THREE.SpriteMaterial({ map: t, transparent: true, depthWrite: false }));
+      s.scale.set(ancho, ancho * 110 / 512, 1);
+      s.position.set(x, y, z);
+      escena.add(s);
+      return s;
+    }
+
+    function alturaEdificio(e) {
+      if (e.letra === "h") return 26;
+      if (e.letra === "F" || e.letra === "W") return 30;
+      if (e.letra === "V") return 34;
+      if (e.letra === "N") return 30;
+      if (e.letra === "I") return 50;
+      if (e.letra === "K") return 32;
+      if (e.letra === "E") return 42;
+      if (e.letra === "G") return 24;
+      if (e.letra === "X") return 26;
+      if (e.nombre === "Hotel Morazán") return 110;
+      if (e.nombre === "Alcaldía") return 70;
+      if (e.nombre === "Bodega") return 50;
+      return 55 + ((e.x * 7 + e.y * 13) % 5) * 15;
+    }
+
+    // --- Construir la ciudad en 3D (se hace una sola vez) ---
+    function construir3D() {
+      const renderer = new THREE.WebGLRenderer({ canvas: lienzo3D, antialias: true });
+      renderer.setPixelRatio(RES);   // 1800p también en 3D
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.shadowMap.enabled = true;
+      renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+      const escena = new THREE.Scene();
+      // Cielo con degradado
+      escena.background = lienzoTextura(4, 256, (g, w, h) => {
+        let d = g.createLinearGradient(0, 0, 0, h);
+        d.addColorStop(0, "#2f7fd6");
+        d.addColorStop(0.55, "#8ecdf7");
+        d.addColorStop(1, "#d8f0ff");
+        g.fillStyle = d;
+        g.fillRect(0, 0, w, h);
+      });
+      escena.fog = new THREE.Fog(0xcfeaff, 450, 1700);
+
+      const camara = new THREE.PerspectiveCamera(72, window.innerWidth / window.innerHeight, 0.5, 7000);
+      camara.rotation.order = "YXZ";
+
+      // Luces: cielo + sol con sombras
+      escena.add(new THREE.HemisphereLight(0xe3f4ff, 0x5a7d3c, 0.55));
+      const sol = new THREE.DirectionalLight(0xfff1d6, 0.7);
+      sol.castShadow = true;
+      sol.shadow.mapSize.set(4096, 4096);   // sombras más definidas
+      sol.shadow.camera.left = -420; sol.shadow.camera.right = 420;
+      sol.shadow.camera.top = 420; sol.shadow.camera.bottom = -420;
+      sol.shadow.camera.near = 10; sol.shadow.camera.far = 1400;
+      sol.shadow.bias = -0.0008;
+      escena.add(sol);
+      escena.add(sol.target);
+
+      // El sol dibujado en el cielo
+      const disco = new THREE.Sprite(new THREE.SpriteMaterial({
+        map: lienzoTextura(128, 128, (g, w, h) => {
+          let r = g.createRadialGradient(64, 64, 8, 64, 64, 64);
+          r.addColorStop(0, "rgba(255,255,240,1)"); r.addColorStop(0.3, "rgba(255,245,200,0.9)"); r.addColorStop(1, "rgba(255,240,200,0)");
+          g.fillStyle = r; g.fillRect(0, 0, w, h);
+        }), fog: false, depthWrite: false, transparent: true }));
+      disco.scale.set(420, 420, 1);
+      escena.add(disco);
+
+      const ANCHO = COLUMNAS * T, LARGO = FILAS * T;
+
+      // Terreno de afuera (hasta el horizonte)
+      const afuera = new THREE.Mesh(new THREE.PlaneGeometry(16000, 16000), mat("#5f9e45"));
+      afuera.rotation.x = -Math.PI / 2;
+      afuera.position.set(ANCHO / 2, -0.6, LARGO / 2);
+      escena.add(afuera);
+
+      // Piso de la ciudad: el mismo mapa de la vista de arriba (calles, aceras, plazas...)
+      const texSuelo = new THREE.CanvasTexture(lienzoSuelo);
+      texSuelo.anisotropy = renderer.capabilities.getMaxAnisotropy();
+      const suelo = new THREE.Mesh(new THREE.PlaneGeometry(ANCHO, LARGO), new THREE.MeshLambertMaterial({ map: texSuelo }));
+      suelo.rotation.x = -Math.PI / 2;
+      suelo.position.set(ANCHO / 2, 0, LARGO / 2);
+      suelo.receiveShadow = true;
+      escena.add(suelo);
+
+      // Mar: el Golfo de Fonseca hasta el horizonte
+      const texOlas = lienzoTextura(256, 256, (g, w, h) => {
+        g.fillStyle = "#1d6fc4";
+        g.fillRect(0, 0, w, h);
+        g.strokeStyle = "rgba(255, 255, 255, 0.25)";
+        g.lineWidth = 3;
+        for (let i = 0; i < 30; i++) {
+          let x = Math.random() * w, y = Math.random() * h;
+          g.beginPath(); g.arc(x, y, 10 + Math.random() * 10, Math.PI * 1.15, Math.PI * 1.85); g.stroke();
+        }
+      });
+      texOlas.repeat.set(120, 60);
+      const materialAgua = new THREE.MeshPhongMaterial({ map: texOlas, color: 0xffffff, shininess: 90, specular: 0x99ccff, transparent: true, opacity: 0.93 });
+      const mar = new THREE.Mesh(new THREE.PlaneGeometry(16000, 8000), materialAgua);
+      mar.rotation.x = -Math.PI / 2;
+      mar.position.set(ANCHO / 2, 0.8, 40 * T + 4000);
+      mar.receiveShadow = true;
+      escena.add(mar);
+      // Estanques de camarón y estero: cuadritos de agua
+      let cuadrosAgua = [];
+      for (let y = 0; y < 40; y++) for (let x = 0; x < COLUMNAS; x++) if (mapa[y][x] === "~" || mapa[y][x] === "C") cuadrosAgua.push([x, y, mapa[y][x]]);
+      const aguaChica = new THREE.InstancedMesh(new THREE.PlaneGeometry(T, T), new THREE.MeshPhongMaterial({ color: 0x3aa6a0, shininess: 80, specular: 0x88ffee }), cuadrosAgua.length);
+      const ayuda = new THREE.Object3D();
+      cuadrosAgua.forEach((a, i) => {
+        ayuda.position.set(a[0] * T + T / 2, 0.6, a[1] * T + T / 2);
+        ayuda.rotation.set(-Math.PI / 2, 0, 0);
+        ayuda.scale.set(a[2] === "C" ? 0.9 : 1, a[2] === "C" ? 0.9 : 1, 1);
+        ayuda.updateMatrix();
+        aguaChica.setMatrixAt(i, ayuda.matrix);
+      });
+      escena.add(aguaChica);
+
+      // La Isla del Tigre (el volcán que se ve en el Golfo de Fonseca)
+      const isla = new THREE.Mesh(new THREE.ConeGeometry(900, 520, 24), new THREE.MeshLambertMaterial({ color: 0x7d9c88, fog: false }));
+      isla.position.set(ANCHO * 0.45, 250, LARGO + 2200);
+      escena.add(isla);
+
+      // Muelle de madera
+      const texMadera = lienzoTextura(64, 64, (g, w, h) => {
+        g.fillStyle = "#8d6e63"; g.fillRect(0, 0, w, h);
+        g.fillStyle = "rgba(0,0,0,0.25)"; for (let y = 0; y < h; y += 8) g.fillRect(0, y, w, 1);
+      });
+      texMadera.repeat.set(4, 28);
+      const muelle = new THREE.Mesh(new THREE.BoxGeometry(4 * T, 3, 7 * T), new THREE.MeshLambertMaterial({ map: texMadera }));
+      muelle.position.set(56 * T, 0, 41.5 * T);
+      muelle.receiveShadow = true;
+      escena.add(muelle);
+
+      // Ayudante para poner cajas
+      function caja(w, h, d, material, x, y, z, sombra) {
+        let m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), material);
+        m.position.set(x, y, z);
+        m.castShadow = sombra !== false;
+        m.receiveShadow = true;
+        escena.add(m);
+        return m;
+      }
+      const geoTecho = new THREE.ConeGeometry(0.7071, 1, 4);
+      geoTecho.rotateY(Math.PI / 4);
+      function techo(w, alto, d, color, x, y, z) {
+        let m = new THREE.Mesh(geoTecho, mat(color, "plano"));
+        m.scale.set(w, alto, d);
+        m.position.set(x, y + alto / 2, z);
+        m.castShadow = true;
+        escena.add(m);
+        return m;
+      }
+
+      // Edificios
+      const NOMBRES_CASA = { F: "Casa del Flaco", W: "Casa de Willito", V: "Casa del Chevez", N: "Casa de Yoni" };
+      for (let e of edificios) {
+        let m = 6;
+        let x0 = e.x * T + m, z0 = e.y * T + m, w = e.w * T - m * 2, d = e.h * T - m * 2;
+        if (e.letra === "X") { x0 = e.x * T + 3; z0 = e.y * T + 14; w = e.w * T - 6; d = e.h * T - 28; }
+        let alto = alturaEdificio(e);
+        let cx = x0 + w / 2, cz = z0 + d / 2;
+
+        if ("hFWVN".includes(e.letra)) {
+          let t = fachada(aclarar(e.color, 75), "casa");
+          t.repeat.set(Math.max(1, Math.round(Math.max(w, d) / 50)), 1);
+          let pared = new THREE.MeshLambertMaterial({ map: t });
+          caja(w, alto, d, pared, cx, alto / 2, cz);
+          techo(w + 10, e.letra === "h" ? 16 : 20, d + 10, e.color, cx, alto, cz);
+          if (NOMBRES_CASA[e.letra]) letrero3D(escena, NOMBRES_CASA[e.letra], cx, alto + 40, cz, 90);
+        } else if (e.letra === "X") {
+          let t = lienzoTextura(64, 64, (g, w2, h2) => {
+            g.fillStyle = e.color; g.fillRect(0, 0, w2, h2);
+            g.fillStyle = "rgba(0,0,0,0.2)"; for (let i = 0; i < w2; i += 8) g.fillRect(i, 0, 3, h2);
+          });
+          t.repeat.set(6, 1);
+          caja(w, alto, d, new THREE.MeshLambertMaterial({ map: t }), cx, alto / 2, cz);
+        } else if (e.letra === "I") {
+          // Iglesia: nave, techo, dos torres al frente (mirando al parque) y una cruz
+          let crema = new THREE.MeshLambertMaterial({ map: fachada("#f3ead0", "casa") });
+          caja(w, alto, d, crema, cx, alto / 2, cz);
+          techo(w + 8, 26, d + 8, "#8d4b32", cx, alto, cz);
+          for (let lado of [-1, 1]) {
+            let tx = cx + lado * (w / 2 - 20), tz = z0 + d - 18;
+            caja(38, 100, 38, mat("#efe4c2"), tx, 50, tz);
+            caja(18, 22, 40, mat("#5d4037"), tx, 80, tz);
+            techo(44, 30, 44, "#8d4b32", tx, 100, tz);
+          }
+          caja(4, 34, 4, mat("#6d4c41"), cx, alto + 42, cz);
+          caja(4, 4, 20, mat("#6d4c41"), cx, alto + 50, cz);
+          caja(26, 34, 3, mat("#5d4037"), cx, 17, z0 + d + 1, false);   // puerta
+          letrero3D(escena, "Iglesia", cx, 150, cz, 70);
+        } else if (e.letra === "K") {
+          // Mercado con toldos de colores
+          caja(w, alto, d, new THREE.MeshLambertMaterial({ map: fachada("#f4a259", "edificio") }), cx, alto / 2, cz);
+          let rayas = lienzoTextura(64, 16, (g) => { for (let i = 0; i < 8; i++) { g.fillStyle = i % 2 ? "#fdd835" : "#e53935"; g.fillRect(i * 8, 0, 8, 16); } });
+          rayas.repeat.set(20, 1);
+          let toldo = new THREE.MeshLambertMaterial({ map: rayas });
+          caja(w + 24, 2, 16, toldo, cx, 20, z0 + d + 8);
+          caja(w + 24, 2, 16, toldo, cx, 20, z0 - 8);
+          letrero3D(escena, "Mercado", cx, alto + 30, cz, 90);
+        } else if (e.letra === "E") {
+          caja(w, alto, d, new THREE.MeshLambertMaterial({ map: fachada("#e3f2fd", "edificio") }), cx, alto / 2, cz);
+          letrero3D(escena, "Escuela", cx, alto + 30, cz, 90);
+          // Asta con la bandera de Honduras
+          caja(2, 90, 2, mat("#9e9e9e"), 46.5 * T, 45, 17.5 * T);
+          let bandera = lienzoTextura(96, 48, (g, w2, h2) => {
+            g.fillStyle = "#0073cf"; g.fillRect(0, 0, w2, h2);
+            g.fillStyle = "#ffffff"; g.fillRect(0, 16, w2, 16);
+            g.fillStyle = "#0073cf";
+            for (let s of [[48, 24], [38, 20], [58, 20], [38, 28], [58, 28]]) { g.beginPath(); g.arc(s[0], s[1], 2.5, 0, Math.PI * 2); g.fill(); }
+          });
+          let tela = new THREE.Mesh(new THREE.PlaneGeometry(36, 18), new THREE.MeshLambertMaterial({ map: bandera, side: THREE.DoubleSide }));
+          tela.position.set(46.5 * T + 18, 80, 17.5 * T);
+          escena.add(tela);
+        } else if (e.letra === "G") {
+          // Gasolinera: tiendita, techo grande con columnas y bombas
+          caja(w, alto, d, new THREE.MeshLambertMaterial({ map: fachada("#fafafa", "edificio") }), cx, alto / 2, cz);
+          caja(4 * T, 5, 2 * T - 10, mat("#fafafa"), 23 * T, 44, 8 * T);
+          caja(4 * T + 2, 3, 2 * T - 8, mat("#e53935"), 23 * T, 40.5, 8 * T, false);
+          for (let px of [21.3, 24.7]) for (let pz of [7.3, 8.7]) caja(4, 42, 4, mat("#bdbdbd"), px * T, 21, pz * T);
+          for (let px of [22.2, 23.8]) caja(6, 14, 10, mat("#e53935"), px * T, 7, 8 * T);
+          letrero3D(escena, "Gasolinera", 23 * T, 64, 8 * T, 90);
+        } else {
+          // Edificio normal con ventanas y techo plano
+          let t = fachada(e.color, "edificio");
+          t.repeat.set(Math.max(1, Math.round(Math.max(w, d) / 32)), Math.max(1, Math.round(alto / 32)));
+          let techoPlano = mat("#8a8a8a");
+          let pared = new THREE.MeshLambertMaterial({ map: t });
+          caja(w, alto, d, [pared, pared, techoPlano, techoPlano, pared, pared], cx, alto / 2, cz);
+          caja(14, 8, 12, mat("#cfd8dc"), cx - w / 4, alto + 4, cz);   // aire acondicionado
+          caja(w + 2, 3, d + 2, mat(aclarar(e.color, -30)), cx, alto + 1.5, cz, false);   // orilla del techo
+          if (e.nombre) letrero3D(escena, e.nombre, cx, alto + 30, cz, 100);
+        }
+      }
+
+      // Árboles (muchos iguales: se dibujan juntos para que vaya rápido)
+      const arboles = adornos.filter(a => a.tipo === "arbol");
+      const troncos = new THREE.InstancedMesh(new THREE.CylinderGeometry(1.6, 2.4, 18, 6), mat("#6d4c41"), arboles.length);
+      const copas = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(13, 1), mat("#ffffff", "plano"), arboles.length);
+      troncos.castShadow = copas.castShadow = true;
+      const verdes = ["#2e7d32", "#388e3c", "#43a047", "#1b5e20"].map(c => new THREE.Color(c));
+      arboles.forEach((a, i) => {
+        let s = 0.8 + ((a.x * 13 + a.y * 7) % 10) / 20;
+        ayuda.position.set(a.x, 9 * s, a.y); ayuda.rotation.set(0, 0, 0); ayuda.scale.set(s, s, s); ayuda.updateMatrix();
+        troncos.setMatrixAt(i, ayuda.matrix);
+        ayuda.position.set(a.x, 26 * s, a.y); ayuda.rotation.set(0, a.x, 0); ayuda.scale.set(s, s * 0.9, s); ayuda.updateMatrix();
+        copas.setMatrixAt(i, ayuda.matrix);
+        copas.setColorAt(i, verdes[i % verdes.length]);
+      });
+      escena.add(troncos, copas);
+
+      // Palmeras
+      const palmeras = adornos.filter(a => a.tipo === "palmera");
+      const troncosP = new THREE.InstancedMesh(new THREE.CylinderGeometry(1.3, 2.2, 42, 6), mat("#8d6e63"), palmeras.length);
+      const geoHoja = new THREE.BoxGeometry(24, 0.6, 6);
+      geoHoja.translate(12, 0, 0);
+      const hojas = new THREE.InstancedMesh(geoHoja, mat("#2e7d32", "plano"), palmeras.length * 7);
+      troncosP.castShadow = hojas.castShadow = true;
+      palmeras.forEach((a, i) => {
+        ayuda.position.set(a.x, 21, a.y); ayuda.rotation.set(0, 0, 0); ayuda.scale.set(1, 1, 1); ayuda.updateMatrix();
+        troncosP.setMatrixAt(i, ayuda.matrix);
+        for (let k = 0; k < 7; k++) {
+          ayuda.position.set(a.x, 42, a.y);
+          ayuda.rotation.set(0, k * Math.PI * 2 / 7 + a.x, -0.45);
+          ayuda.updateMatrix();
+          hojas.setMatrixAt(i * 7 + k, ayuda.matrix);
+        }
+      });
+      escena.add(troncosP, hojas);
+
+      // Manglares: arbustos verdes y tupidos
+      let cuadrosManglar = [];
+      for (let y = 0; y < FILAS; y++) for (let x = 0; x < COLUMNAS; x++) if (mapa[y][x] === "M") cuadrosManglar.push([x, y]);
+      const manglar = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(12, 0), mat("#1f5f2a", "plano"), cuadrosManglar.length * 4);
+      manglar.castShadow = true;
+      cuadrosManglar.forEach((c, i) => {
+        for (let k = 0; k < 4; k++) {
+          let s = 1 + ((c[0] * 3 + c[1] * 5 + k) % 5) / 5;
+          ayuda.position.set(c[0] * T + 16 + (k % 2) * 32, 9 * s, c[1] * T + 16 + Math.floor(k / 2) * 32);
+          ayuda.rotation.set(0, k, 0); ayuda.scale.set(s, s * 0.8, s); ayuda.updateMatrix();
+          manglar.setMatrixAt(i * 4 + k, ayuda.matrix);
+        }
+      });
+      escena.add(manglar);
+
+      // Postes de luz en la Panamericana y el malecón
+      let postes = [];
+      for (let x = 1; x < COLUMNAS; x += 3) { postes.push([x * T, 3.9 * T]); }
+      for (let x = 3; x < 49; x += 3) { if (mapa[37][x] === "P") postes.push([x * T + 32, 37.2 * T]); }
+      const palos = new THREE.InstancedMesh(new THREE.CylinderGeometry(0.8, 1, 40, 5), mat("#607d8b"), postes.length);
+      const lamparas = new THREE.InstancedMesh(new THREE.BoxGeometry(10, 2, 4), mat("#fff9c4"), postes.length);
+      postes.forEach((p, i) => {
+        ayuda.rotation.set(0, 0, 0); ayuda.scale.set(1, 1, 1);
+        ayuda.position.set(p[0], 20, p[1]); ayuda.updateMatrix(); palos.setMatrixAt(i, ayuda.matrix);
+        ayuda.position.set(p[0] + 4, 40, p[1]); ayuda.updateMatrix(); lamparas.setMatrixAt(i, ayuda.matrix);
+      });
+      palos.castShadow = true;
+      escena.add(palos, lamparas);
+
+      // Esculturas, grúas y barco
+      for (let a of adornos) {
+        if (a.tipo === "tiburon" || a.tipo === "camaron" || a.tipo === "pelicano") {
+          let base = new THREE.Mesh(new THREE.CylinderGeometry(40, 44, 6, 32), mat("#bdbdbd"));
+          base.position.set(a.x, 3, a.y); base.receiveShadow = true; escena.add(base);
+          let pedestal = new THREE.Mesh(new THREE.CylinderGeometry(6, 8, 14, 12), mat("#9e9e9e"));
+          pedestal.position.set(a.x, 13, a.y); pedestal.castShadow = true; escena.add(pedestal);
+        }
+        if (a.tipo === "tiburon") {
+          let gris = mat("#78909c", "brillo");
+          let cuerpo = new THREE.Mesh(new THREE.SphereGeometry(1, 20, 12), gris);
+          cuerpo.scale.set(34, 10, 11); cuerpo.position.set(a.x, 34, a.y); cuerpo.rotation.z = 0.25; cuerpo.castShadow = true; escena.add(cuerpo);
+          let aleta = new THREE.Mesh(new THREE.ConeGeometry(6, 16, 4), gris); aleta.position.set(a.x + 2, 48, a.y); aleta.castShadow = true; escena.add(aleta);
+          let cola = new THREE.Mesh(new THREE.ConeGeometry(9, 18, 4), gris); cola.position.set(a.x - 36, 28, a.y); cola.rotation.z = Math.PI / 2 + 0.3; escena.add(cola);
+          letrero3D(escena, "El Tiburón", a.x, 70, a.y, 60);
+        } else if (a.tipo === "camaron") {
+          let camaron = new THREE.Mesh(new THREE.TorusGeometry(16, 6, 10, 24, Math.PI * 1.4), mat("#ff8a65", "brillo"));
+          camaron.position.set(a.x, 38, a.y); camaron.rotation.set(0, 0.6, 0.4); camaron.castShadow = true; escena.add(camaron);
+          letrero3D(escena, "El Camarón", a.x, 72, a.y, 60);
+        } else if (a.tipo === "pelicano") {
+          let blanco = mat("#fafafa", "brillo");
+          let cuerpo = new THREE.Mesh(new THREE.SphereGeometry(1, 16, 12), blanco); cuerpo.scale.set(12, 16, 10); cuerpo.position.set(a.x, 34, a.y); cuerpo.castShadow = true; escena.add(cuerpo);
+          let cabeza = new THREE.Mesh(new THREE.SphereGeometry(6, 12, 10), blanco); cabeza.position.set(a.x + 4, 54, a.y); escena.add(cabeza);
+          let pico = new THREE.Mesh(new THREE.ConeGeometry(3, 26, 8), mat("#ffa000")); pico.position.set(a.x + 17, 51, a.y); pico.rotation.z = -Math.PI / 2 - 0.2; escena.add(pico);
+          letrero3D(escena, "El Pelícano", a.x, 80, a.y, 60);
+        } else if (a.tipo === "grua") {
+          let amarillo = mat("#fbc02d");
+          caja(10, 140, 10, amarillo, a.x, 70, a.y);
+          caja(130, 8, 8, amarillo, a.x + 35, 138, a.y);
+          caja(18, 14, 16, mat("#f57f17"), a.x, 128, a.y);
+          caja(1, 70, 1, mat("#333333"), a.x + 90, 102, a.y, false);
+        } else if (a.tipo === "barco") {
+          caja(250, 26, 170, mat("#37474f"), a.x + 125, 8, a.y + 85);
+          caja(240, 3, 160, mat("#b71c1c"), a.x + 125, -3, a.y + 85, false);
+          const colores = ["#e53935", "#1e88e5", "#43a047", "#fb8c00"];
+          for (let i = 0; i < 4; i++) for (let k = 0; k < 3; k++) caja(34, 22, 38, mat(colores[(i + k) % 4]), a.x + 77 + i * 40, 32, a.y + 39 + k * 45);
+          caja(40, 50, 90, mat("#eceff1"), a.x + 30, 46, a.y + 85);
+          caja(42, 8, 92, mat("#263238"), a.x + 30, 60, a.y + 85);
+        }
+      }
+      letrero3D(escena, "Puerto de Henecán", 56 * T, 170, 30 * T, 150);
+      letrero3D(escena, "Paseo La Cabaña", 23.5 * T, 50, 38.3 * T, 90);
+      letrero3D(escena, "Camaroneras", 3.5 * T, 50, 7.6 * T, 90);
+
+      // Marcas de misión (columnas de luz, como en GTA)
+      function columnaLuz(color, radio, alto, opacidad) {
+        let m = new THREE.Mesh(new THREE.CylinderGeometry(radio, radio, alto, 28, 1, true),
+          new THREE.MeshBasicMaterial({ color: color, transparent: true, opacity: opacidad, depthWrite: false, side: THREE.DoubleSide }));
+        m.visible = false;
+        escena.add(m);
+        return m;
+      }
+      const marcas = [0, 1, 2].map(() => columnaLuz(0xffffff, 18, 70, 0.35));
+      const destino = columnaLuz(0xffeb3b, 28, 600, 0.28);
+      const paquete = caja(16, 16, 16, mat("#a1887f"), 0, 8, 0);
+      paquete.visible = false;
+
+      mundo3D = { renderer, escena, camara, sol, disco, texOlas, marcas, destino, paquete,
+                  carros: new Map(), personas: new Map(), cuadro: 0 };
+    }
+
+    // --- Modelos 3D de carros y personas ---
+    function modeloCarro(c) {
+      let g = new THREE.Group();
+      let w = c.w, h = c.h;
+      let pintura = mat(c.tipo === "policia" ? "#f5f5f5" : c.color, "brillo");
+      let vidrio = mat("#1c2833", "brillo", { shininess: 120 });
+      let negro = mat("#1a1a1a");
+      function pieza(geo, material, x, y, z) {
+        let m = new THREE.Mesh(geo, material);
+        m.position.set(x, y, z);
+        m.castShadow = true;
+        g.add(m);
+        return m;
+      }
+      if (c.tipo === "bus") return modeloBus(c, g, pieza, negro);
+      pieza(new THREE.BoxGeometry(w, 7, h), pintura, 0, 7.5, 0);                                  // carrocería
+      let cabinaX = c.tipo === "pickup" ? w * 0.12 : -w * 0.05;
+      g.userData.cabina = pieza(new THREE.BoxGeometry(w * 0.46, 7, h * 0.88), vidrio, cabinaX, 14.5, 0);   // vidrios
+      g.userData.techo = pieza(new THREE.BoxGeometry(w * 0.4, 1.2, h * 0.84), pintura, cabinaX, 18.5, 0);  // techo
+      if (c.tipo === "pickup") pieza(new THREE.BoxGeometry(w * 0.4, 4, h * 0.8), mat("#3e2723"), -w * 0.26, 11.5, 0); // paila
+      if (c.tipo === "policia") {
+        pieza(new THREE.BoxGeometry(w * 0.42, 5, h + 0.4), negro, 0, 8, 0);                        // puertas negras
+        g.userData.rojo = pieza(new THREE.BoxGeometry(3, 2, h * 0.34), new THREE.MeshBasicMaterial({ color: 0xff1744 }), cabinaX, 20.2, -h * 0.2);
+        g.userData.azul = pieza(new THREE.BoxGeometry(3, 2, h * 0.34), new THREE.MeshBasicMaterial({ color: 0x2979ff }), cabinaX, 20.2, h * 0.2);
+      }
+      if (c.tipo === "taxi") pieza(new THREE.BoxGeometry(4, 3, 9), new THREE.MeshBasicMaterial({ color: 0xffee58 }), cabinaX, 20.5, 0);
+      let geoRueda = new THREE.CylinderGeometry(4, 4, 3, 14);
+      geoRueda.rotateX(Math.PI / 2);
+      for (let sx of [-1, 1]) for (let sz of [-1, 1]) pieza(geoRueda, negro, sx * w * 0.32, 4, sz * (h / 2 - 0.5));
+      let luzBlanca = new THREE.MeshBasicMaterial({ color: 0xfff8c4 }), luzRoja = new THREE.MeshBasicMaterial({ color: 0xd50000 });
+      for (let sz of [-1, 1]) {
+        pieza(new THREE.BoxGeometry(1, 2, 4), luzBlanca, w / 2, 8.5, sz * h * 0.32);
+        pieza(new THREE.BoxGeometry(1, 2, 4), luzRoja, -w / 2, 8.5, sz * h * 0.32);
+      }
+      return g;
+    }
+
+    // El bus de Yoni: colorido, con ventanas a los lados y parabrisas grande
+    function modeloBus(c, g, pieza, negro) {
+      let w = c.w, h = c.h, alto = 26;
+      let lado = lienzoTextura(256, 64, (x, W, H) => {
+        x.fillStyle = "#fafafa"; x.fillRect(0, 0, W, H);
+        x.fillStyle = c.color; x.fillRect(0, 38, W, 26);                  // parte de abajo pintada
+        x.fillStyle = "#fdd835"; x.fillRect(0, 34, W, 4);                 // franja amarilla
+        x.fillStyle = "#1c2833";
+        for (let i = 8; i < W - 20; i += 26) x.fillRect(i, 8, 20, 22);    // ventanas
+        x.fillStyle = "#6d4c41"; x.fillRect(W - 26, 8, 16, 52);           // puerta
+      });
+      let frente = lienzoTextura(64, 64, (x, W, H) => {
+        x.fillStyle = "#fafafa"; x.fillRect(0, 0, W, H);
+        x.fillStyle = c.color; x.fillRect(0, 38, W, 26);
+        x.fillStyle = "#1c2833"; x.fillRect(4, 6, W - 8, 28);             // parabrisas
+        x.fillStyle = "#fff8c4"; x.fillRect(4, 48, 10, 6); x.fillRect(W - 14, 48, 10, 6);
+        x.fillStyle = "#111"; x.font = "bold 9px Arial"; x.fillText("SAN LORENZO", 3, 5);
+      });
+      let atras = lienzoTextura(64, 64, (x, W, H) => {
+        x.fillStyle = "#fafafa"; x.fillRect(0, 0, W, H);
+        x.fillStyle = c.color; x.fillRect(0, 38, W, 26);
+        x.fillStyle = "#1c2833"; x.fillRect(8, 8, W - 16, 20);
+        x.fillStyle = "#d50000"; x.fillRect(4, 48, 8, 6); x.fillRect(W - 12, 48, 8, 6);
+      });
+      let mLado = new THREE.MeshLambertMaterial({ map: lado });
+      let techoBlanco = mat("#eeeeee");
+      pieza(new THREE.BoxGeometry(w, alto, h), [new THREE.MeshLambertMaterial({ map: frente }), new THREE.MeshLambertMaterial({ map: atras }),
+                                                techoBlanco, techoBlanco, mLado, mLado], 0, 4 + alto / 2, 0);
+      g.userData.cabina = pieza(new THREE.BoxGeometry(w * 0.9, 3, h * 0.6), mat("#cfd8dc"), 0, 4 + alto + 1.5, 0);   // parrilla del techo
+      g.userData.techo = g.userData.cabina;
+      let geoRueda = new THREE.CylinderGeometry(5, 5, 3.5, 14);
+      geoRueda.rotateX(Math.PI / 2);
+      for (let sx of [-0.33, 0.3]) for (let sz of [-1, 1]) pieza(geoRueda, negro, sx * w, 5, sz * (h / 2 - 0.5));
+      return g;
+    }
+
+    function modeloPersona(ropa) {
+      let g = new THREE.Group();
+      let ancho = ropa.ancho || 1;
+      let camisa = mat(ropa.camisa), piel = mat(ropa.piel), pantalon = mat("#2f3b52"), pelo = mat(ropa.pelo || "#222");
+      function pieza(geo, material, x, y, z, padre) {
+        let m = new THREE.Mesh(geo, material);
+        m.position.set(x, y, z);
+        (padre || g).add(m);
+        return m;
+      }
+      // Piernas y brazos van en "bisagras" para poder moverlos al caminar
+      let piernas = [], brazos = [];
+      for (let lado of [-1, 1]) {
+        let cadera = new THREE.Group(); cadera.position.set(0, 8, lado * 1.4 * ancho); g.add(cadera);
+        pieza(new THREE.BoxGeometry(2, 8, 2), ropa.vestido ? piel : pantalon, 0, -4, 0, cadera);
+        piernas.push(cadera);
+        let hombro = new THREE.Group(); hombro.position.set(0, 14.5, lado * 3.9 * ancho); g.add(hombro);
+        pieza(new THREE.BoxGeometry(1.7, 6.5, 1.7), piel, 0, -3.2, 0, hombro);
+        pieza(new THREE.BoxGeometry(1.9, 2.5, 1.9), camisa, 0, -0.5, 0, hombro);
+        brazos.push(hombro);
+      }
+      pieza(new THREE.BoxGeometry(3.2, 7, 6 * ancho), camisa, 0, 11.5, 0);                       // cuerpo
+      if (ropa.vestido) pieza(new THREE.CylinderGeometry(2.5, 4.5, 7, 10), camisa, 0, 6, 0);     // falda
+      pieza(new THREE.SphereGeometry(2.4, 12, 10), piel, 0.2, 17.6, 0);                          // cabeza
+      if (ropa.gorra) {
+        pieza(new THREE.CylinderGeometry(2.6, 2.6, 1.4, 12), mat(ropa.gorra), 0, 19.3, 0);
+        pieza(new THREE.BoxGeometry(2.6, 0.4, 3.8), mat(ropa.gorra), 2.3, 18.7, 0);
+      } else {
+        pieza(new THREE.SphereGeometry(2.55, 12, 8, 0, Math.PI * 2, 0, Math.PI / 2), pelo, -0.2, 17.9, 0);
+        if (ropa.pelolargo) pieza(new THREE.BoxGeometry(1.4, 5, 4.2), pelo, -2, 16, 0);
+      }
+      if (ropa.bigote) pieza(new THREE.BoxGeometry(0.6, 0.6, 2.6), pelo, 2.5, 17, 0);
+      if (ropa.lentes) pieza(new THREE.BoxGeometry(0.5, 0.9, 3.4), mat("#111111", "brillo"), 2.55, 18.2, 0);
+      for (let lado of [-1, 1]) pieza(new THREE.BoxGeometry(0.4, 0.7, 0.7), mat("#111111"), 2.5, 18.2, lado * 0.9);   // ojos
+      g.scale.setScalar(ropa.escala || 1);
+      g.userData.piernas = piernas;
+      g.userData.brazos = brazos;
+      return g;
+    }
+
+    // Pone cada carro y persona del juego en su lugar dentro del mundo 3D
+    function ponerModelo(lista, clave, crear, x, y, ang, paso) {
+      let m = lista.get(clave);
+      if (!m) {
+        m = crear();
+        mundo3D.escena.add(m);
+        lista.set(clave, m);
+      }
+      m.userData.visto = mundo3D.cuadro;
+      m.position.set(x, 0, y);
+      m.rotation.y = -ang;
+      if (paso !== undefined && m.userData.piernas) {
+        let s = Math.sin(paso) * 0.6;
+        m.userData.piernas[0].rotation.z = s; m.userData.piernas[1].rotation.z = -s;
+        m.userData.brazos[0].rotation.z = -s; m.userData.brazos[1].rotation.z = s;
+      }
+      return m;
+    }
+    function borrarNoVistos(lista) {
+      for (let [clave, m] of lista) {
+        if (m.userData.visto !== mundo3D.cuadro) { mundo3D.escena.remove(m); lista.delete(clave); }
+      }
+    }
+
+    function dibujar3D() {
+      let M = mundo3D;
+      M.cuadro++;
+      let j = jugadorActual();
+      let camara = M.camara;
+
+      // Dónde va la cámara (los ojos del personaje o el asiento del carro)
+      let cx, cy, alto, yaw;
+      if (j.carro) {
+        let c = j.carro;
+        mirarLado *= 0.97;
+        yaw = c.ang + mirarLado;
+        // En el bus vas más alto y adelante, junto al parabrisas
+        let adelante = c.tipo === "bus" ? c.w * 0.38 : 2, izquierda = c.tipo === "bus" ? 7 : 4.5;
+        cx = c.x + Math.cos(c.ang) * adelante + Math.sin(c.ang) * izquierda;
+        cy = c.y + Math.sin(c.ang) * adelante - Math.cos(c.ang) * izquierda;
+        alto = c.tipo === "bus" ? 27 : 17;
+      } else {
+        yaw = mirarYaw;
+        cx = j.x; cy = j.y;
+        alto = 16.5 * PERSONAJES[activo].escala + Math.sin(j.paso * 2) * 0.35;
+      }
+      if (temblor > 0) { cx += (Math.random() - 0.5) * temblor * 0.4; alto += (Math.random() - 0.5) * temblor * 0.3; }
+      camara.position.set(cx, alto, cy);
+      camara.rotation.set(mirarPitch, -yaw - Math.PI / 2, 0);
+
+      // El sol y su sombra siguen al jugador
+      M.sol.position.set(cx + 260, 480, cy + 180);
+      M.sol.target.position.set(cx, 0, cy);
+      M.sol.target.updateMatrixWorld();
+      M.disco.position.set(cx + 1300, 2400, cy + 900);
+      M.texOlas.offset.x = cuadro * 0.0004;
+      M.texOlas.offset.y = Math.sin(cuadro * 0.01) * 0.01;
+
+      let cerca = (x, y, d) => Math.abs(x - cx) < d && Math.abs(y - cy) < d;
+
+      // Carros
+      for (let c of carros) {
+        let m = ponerModelo(M.carros, c, () => modeloCarro(c), c.x, c.y, c.ang);
+        m.visible = cerca(c.x, c.y, 1300);
+        // Desde adentro de tu carro solo se ve el capó (sin techo ni vidrios estorbando)
+        let propio = c === j.carro;
+        m.userData.cabina.visible = !propio;
+        m.userData.techo.visible = !propio;
+        if (m.userData.rojo) {
+          let prende = Math.floor(cuadro / 8) % 2 === 0;
+          m.userData.rojo.visible = prende;
+          m.userData.azul.visible = !prende;
+        }
+      }
+      borrarNoVistos(M.carros);
+
+      // Personas
+      for (let pe of peatones) {
+        let m = ponerModelo(M.personas, pe, () => modeloPersona(pe), pe.x, pe.y, pe.ang, pe.paso);
+        m.visible = cerca(pe.x, pe.y, 900);
+      }
+      for (let f of posicionesFamilia()) ponerModelo(M.personas, "familia-" + f.quien, () => modeloPersona(ROPA_FAMILIA[f.quien]), f.x, f.y, f.ang, cuadro * 0.1);
+      jugadores.forEach((jj, i) => {
+        if (jj.carro || i === activo) return;
+        ponerModelo(M.personas, "jugador-" + i, () => modeloPersona(ropaDeProtagonista(i)), jj.x, jj.y, jj.ang, 0);
+      });
+      let pasoActual = misionActiva ? misionActiva.m.pasos[misionActiva.paso] : null;
+      if (pasoActual && pasoActual.pasajero) {
+        let l = lugarPx(pasoActual.lugar);
+        ponerModelo(M.personas, "pasajero", () => modeloPersona({ camisa: "#00897b", piel: "#e0ac69", pelo: "#555" }), l.x + 20, l.y - 20, Math.PI / 2, 0);
+      }
+      borrarNoVistos(M.personas);
+
+      // Marcas de misión y destino
+      M.marcas.forEach(m => m.visible = false);
+      M.destino.visible = false;
+      M.paquete.visible = false;
+      if (!misionActiva) {
+        let lista = MISIONES.filter(m => m.personaje === activo);
+        lista.forEach((m, i) => {
+          let l = lugarPx(m.inicio), marca = M.marcas[i];
+          marca.visible = Math.hypot(l.x - cx, l.y - cy) > 24;   // no taparte la vista si estás parado adentro
+          marca.material.color.set(PERSONAJES[activo].color);
+          marca.position.set(l.x, 35 + Math.sin(cuadro * 0.05) * 2, l.y);
+        });
+      } else if (pasoActual && pasoActual.lugar) {
+        let l = lugarPx(pasoActual.lugar);
+        M.destino.visible = Math.hypot(l.x - cx, l.y - cy) > 34;
+        M.destino.position.set(l.x, 300, l.y);
+        if (pasoActual.paquete) {
+          M.paquete.visible = true;
+          M.paquete.position.set(l.x, 8 + Math.sin(cuadro * 0.08) * 2, l.y);
+          M.paquete.rotation.y = cuadro * 0.03;
+        }
+      }
+
+      M.renderer.render(M.escena, camara);
+    }
+
+    // Convierte una posición del mundo 3D a un punto de la pantalla
+    function aPantalla3D(x, alto, y) {
+      let v = new THREE.Vector3(x, alto, y).project(mundo3D.camara);
+      if (v.z > 1 || v.z < -1 || Math.abs(v.x) > 1.2 || Math.abs(v.y) > 1.2) return null;
+      return { x: (v.x + 1) / 2 * PW, y: (1 - v.y) / 2 * PH };
+    }
+
+    // Globitos de texto y nombres encima de las personas en 3D
+    function dibujarEtiquetas3D() {
+      let p = posJugador();
+      for (let b of burbujas) {
+        if (Math.hypot(b.obj.x - p.x, b.obj.y - p.y) > 450 || b.obj === jugadorActual()) continue;
+        let s = aPantalla3D(b.obj.x, b.obj.w ? 30 : 27, b.obj.y);
+        if (!s) continue;
+        ctx.font = "bold 16px Arial";
+        let ancho = ctx.measureText(b.texto).width + 18;
+        ctx.globalAlpha = Math.min(1, b.t / 20);
+        ctx.fillStyle = "white";
+        rectRedondo(s.x - ancho / 2, s.y - 30, ancho, 28, 8);
+        ctx.fill();
+        ctx.beginPath(); ctx.moveTo(s.x - 6, s.y - 2); ctx.lineTo(s.x, s.y + 7); ctx.lineTo(s.x + 6, s.y - 2); ctx.fill();
+        ctx.fillStyle = "#222";
+        ctx.textAlign = "center";
+        ctx.fillText(b.texto, s.x, s.y - 10);
+        ctx.textAlign = "left";
+        ctx.globalAlpha = 1;
+      }
+      // Lo que dice tu propio personaje sale abajo, como subtítulo
+      let propio = burbujas.find(b => b.obj === jugadorActual() || b.obj === jugadorActual().carro);
+      if (propio) {
+        ctx.font = "bold 22px Arial";
+        ctx.textAlign = "center";
+        texto(PERSONAJES[activo].nombre + ": " + propio.texto, PW / 2, PH - 140);
+        ctx.textAlign = "left";
+      }
+      // Nombres de los otros protagonistas
+      ctx.font = "bold 15px Arial";
+      ctx.textAlign = "center";
+      jugadores.forEach((j, i) => {
+        if (i === activo) return;
+        let q = posJugador(i);
+        if (Math.hypot(q.x - p.x, q.y - p.y) > 600) return;
+        let s = aPantalla3D(q.x, 28, q.y);
+        if (s) texto(PERSONAJES[i].nombre, s.x, s.y);
+      });
+      ctx.textAlign = "left";
+    }
+
+    // Volante del carro (abajo de la pantalla)
+    function dibujarVolante() {
+      let W = PW, H = PH;
+      let giro = (tecla("ArrowRight", "KeyD") ? 1 : 0) - (tecla("ArrowLeft", "KeyA") ? 1 : 0);
+      volante += (giro * 0.9 - volante) * 0.15;
+      let r = Math.min(W, H) * 0.2;
+      ctx.save();
+      ctx.translate(W / 2, H + r * 0.35);
+      ctx.rotate(volante);
+      ctx.strokeStyle = "#1b1b1b";
+      ctx.lineWidth = r * 0.16;
+      ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.stroke();
+      ctx.strokeStyle = "#333";
+      ctx.lineWidth = r * 0.05;
+      ctx.beginPath(); ctx.arc(0, 0, r * 1.03, Math.PI * 1.15, Math.PI * 1.85); ctx.stroke();
+      ctx.fillStyle = "#1b1b1b";
+      ctx.fillRect(-r, -r * 0.06, r * 2, r * 0.12);
+      ctx.beginPath(); ctx.arc(0, 0, r * 0.22, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = "#b71c1c";
+      ctx.beginPath(); ctx.arc(0, 0, r * 0.08, 0, Math.PI * 2); ctx.fill();
+      ctx.restore();
+    }
+
+    // Brújula arriba que apunta al destino de la misión
+    function dibujarFlecha3D(paso) {
+      if (!paso.lugar) return;
+      let l = lugarPx(paso.lugar), p = posJugador();
+      let j = jugadorActual();
+      let yaw = j.carro ? j.carro.ang + mirarLado : mirarYaw;
+      let rel = diferenciaAngulo(yaw, Math.atan2(l.y - p.y, l.x - p.x));
+      let x = PW / 2, y = misionActiva.tiempo > 0 ? 130 : 100;
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.rotate(rel);
+      ctx.fillStyle = "#ffeb3b";
+      ctx.strokeStyle = "#333";
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(0, -24); ctx.lineTo(16, 12); ctx.lineTo(0, 4); ctx.lineTo(-16, 12);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+      ctx.font = "bold 16px Arial";
+      ctx.textAlign = "center";
+      texto(Math.round(Math.hypot(l.x - p.x, l.y - p.y) / 10) + " m", x, y + 36);
+      ctx.textAlign = "left";
+    }
+
+    // 23. EL BUCLE DEL JUEGO (siempre 60 pasos por segundo)
+    function paso() {
+      cuadro++;
+      if (estado !== "jugando" && document.pointerLockElement) document.exitPointerLock();
+      if (estado === "jugando") actualizar();
+      else if (estado === "cambiando") actualizarCambio();
+      else if (estado === "casa") actualizarCasa();
+      else if (estado === "inicio") {
+        // Que el tráfico se mueva de fondo en la pantalla de inicio
+        for (let c of carros) if (c.conductor === "npc" && c.ai) actualizarTrafico(c);
+        actualizarPeatones();
+      }
+    }
+
+    let tiempoAnterior = performance.now();
+    let acumulado = 0;
+    function bucle(ahora) {
+      acumulado += Math.min(100, ahora - tiempoAnterior);
+      tiempoAnterior = ahora;
+      while (acumulado >= 1000 / 60) {
+        paso();
+        acumulado -= 1000 / 60;
+      }
+      dibujar();
+      requestAnimationFrame(bucle);
+    }
+
+    // 24. ¡EMPEZAR!
+    ajustarPantalla();
+    construirCiudad();
+    prepararMapa();
+    nuevoMundo();
+    requestAnimationFrame(bucle);
+  </script>
+</body>
+</html>

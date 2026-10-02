@@ -1,0 +1,1440 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <title>La Bolita Roja</title>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      background: #000;
+      font-family: Arial, sans-serif;
+    }
+    canvas {
+      display: block;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="juego"></canvas>
+
+  <script>
+    // =====================================================================
+    //  LA BOLITA ROJA  -  un juego de plataformas inspirado en Red Ball 4
+    //  ¡Los cuadrados malvados quieren volver cuadrado el mundo!
+    // =====================================================================
+
+    // 1. PREPARAR EL LIENZO (ocupa toda la pantalla)
+    const canvas = document.getElementById("juego");
+    const ctx = canvas.getContext("2d");
+
+    // 2. REGLAS DEL JUEGO
+    const MUNDO_ALTO = 600;      // alto del mundo (se estira para llenar el alto de la pantalla)
+    const FONDO_MUNDO = 720;     // hasta dónde llega la tierra hacia abajo (más abajo = caíste)
+    const SUELO = 480;           // altura normal del piso
+    const GRAVEDAD = 0.6;
+    const FUERZA_SALTO = 12.5;
+    const VELOCIDAD_MAX = 6.5;   // velocidad máxima empujando con las flechas
+    const VIDAS_INICIALES = 5;
+
+    // 3. VARIABLES DEL JUEGO
+    let escala = 1;              // cuánto se agranda el mundo para llenar la pantalla
+    let vistaAncho = 800;        // cuánto mundo se ve a lo ancho
+    let camX = 0;                // posición de la cámara
+    let bola = { x: 0, y: 0, vx: 0, vy: 0, r: 22, angulo: 0, enSuelo: false, sobre: null, coyote: 0, mira: 1 };
+    let teclas = {};
+    let bufferSalto = 0;         // recuerda que apretaste saltar un momento antes de tocar el piso
+    let estado = "inicio";       // "inicio", "aviso", "jugando", "menu", "nivelCompleto", "perdido", "ganado"
+    let numNivel = 0;            // qué nivel se está jugando (0 = el primero)
+    let nivel = null;            // todo lo que hay en el nivel actual
+    let vidas = VIDAS_INICIALES;
+    let muriendo = 0;            // cuadros de la animación cuando pierdes una vida
+    let invencible = 0;          // cuadros de invencible después de reaparecer
+    let molesto = 0;             // cuadros con cara de molesta
+    let avisoCuadros = 0;
+    let temblor = 0;             // la pantalla tiembla (cuando cae un aplastador o el jefe)
+    let cuadro = 0;              // contador para las animaciones
+    let reaparecer = { x: 0, y: 0 };   // dónde vuelves al perder una vida
+    let estrellasTomadas = 0;          // estrellas de este nivel
+    let estrellasNivel = [];           // mejores estrellas de cada nivel
+    const OPCIONES_MENU = ["▶ Seguir jugando", "🔄 Reiniciar nivel", "🏠 Volver al inicio"];
+    let opcionMenu = 0;
+
+    // 4. AJUSTAR EL JUEGO AL TAMAÑO DE LA VENTANA
+    function ajustarPantalla() {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+      escala = canvas.height / MUNDO_ALTO;
+      vistaAncho = canvas.width / escala;
+    }
+    window.addEventListener("resize", ajustarPantalla);
+
+    // 5. LEER EL TECLADO
+    function esTeclaSalto(codigo) {
+      return codigo === "ArrowUp" || codigo === "Space" || codigo === "KeyW";
+    }
+
+    document.addEventListener("keydown", function (e) {
+      teclas[e.code] = true;
+      if (e.code.startsWith("Arrow") || e.code === "Space" || e.code === "Backspace") e.preventDefault();
+      let enter = e.key === "Enter";
+
+      if (estado === "jugando") {
+        if (esTeclaSalto(e.code) && !e.repeat) bufferSalto = 8;
+        if (e.code === "Backspace") { estado = "menu"; opcionMenu = 0; }
+
+      } else if (estado === "menu") {
+        if (e.code === "ArrowUp")   opcionMenu = (opcionMenu + OPCIONES_MENU.length - 1) % OPCIONES_MENU.length;
+        if (e.code === "ArrowDown") opcionMenu = (opcionMenu + 1) % OPCIONES_MENU.length;
+        if (e.code === "Backspace") estado = "jugando";
+        if (enter) {
+          if (opcionMenu === 0) estado = "jugando";
+          if (opcionMenu === 1) cargarNivel(numNivel);
+          if (opcionMenu === 2) { cargarNivel(0); estado = "inicio"; }
+        }
+
+      } else if (estado === "inicio") {
+        if (enter) nuevaPartida();
+
+      } else if (estado === "nivelCompleto") {
+        if (enter) {
+          if (numNivel < NIVELES.length - 1) cargarNivel(numNivel + 1);
+          else estado = "ganado";
+        }
+
+      } else if (estado === "perdido") {
+        // Vuelves a intentar el mismo nivel con vidas nuevas
+        if (enter) { vidas = VIDAS_INICIALES; cargarNivel(numNivel); }
+
+      } else if (estado === "ganado") {
+        if (enter) { cargarNivel(0); estado = "inicio"; }
+      }
+    });
+
+    document.addEventListener("keyup", function (e) {
+      teclas[e.code] = false;
+      // Si sueltas el salto antes, saltas más bajito
+      if (esTeclaSalto(e.code) && estado === "jugando" && bola.vy < -5) bola.vy = -5;
+    });
+
+    // 6. CONSTRUIR LOS NIVELES
+    // Estas funciones agregan cosas al nivel que se está armando.
+
+    function puntosDeRect(x, y, w, h) {
+      return [{ x: x, y: y }, { x: x + w, y: y }, { x: x + w, y: y + h }, { x: x, y: y + h }];
+    }
+    // Piso de tierra con pasto (desde "y" hasta abajo)
+    function suelo(x, ancho, y = SUELO) {
+      nivel.solidos.push({ tipo: "tierra", puntos: puntosDeRect(x, y, ancho, FONDO_MUNDO - y) });
+    }
+    // Plataforma flotante
+    function plataforma(x, y, ancho, alto = 24) {
+      nivel.solidos.push({ tipo: "plataforma", puntos: puntosDeRect(x, y, ancho, alto) });
+    }
+    // Pared alta de piedra
+    function muro(x, ancho) {
+      nivel.solidos.push({ tipo: "muro", puntos: puntosDeRect(x, -400, ancho, 1200) });
+    }
+    // Subida o bajada: de (x1, y1) a (x2, y2)
+    function rampa(x1, y1, x2, y2) {
+      nivel.solidos.push({ tipo: "tierra", puntos: [{ x: x1, y: y1 }, { x: x2, y: y2 }, { x: x2, y: FONDO_MUNDO }, { x: x1, y: FONDO_MUNDO }] });
+    }
+    // Fila de "cantidad" pinchos sobre el piso
+    function pinchos(x, y, cantidad) {
+      nivel.pinchos.push({ x: x, y: y, n: cantidad });
+    }
+    // Cuadrado malvado que camina entre x1 y x2
+    function enemigo(x1, x2, y = SUELO) {
+      nivel.enemigos.push({ x: x1, y: y - 40, t: 40, x1: x1, x2: x2, v: 1.5, vivo: true, aplastado: 0 });
+    }
+    // Caja de madera que se puede empujar
+    function caja(x, y = SUELO) {
+      nivel.cajas.push({ x: x, y: y - 50, w: 50, h: 50, vx: 0, vy: 0, empuje: 0, x0: x, y0: y - 50 });
+    }
+    // Plataforma que va y viene (dx, dy = cuánto se mueve; periodo = cuántos cuadros tarda ida y vuelta)
+    function movil(x, y, ancho, dx, dy, periodo) {
+      nivel.moviles.push({ x0: x, y0: y, x: x, y: y, w: ancho, h: 20, dx: dx, dy: dy, periodo: periodo, t: 0, mx: 0, my: 0 });
+    }
+    // Bloque que cae y aplasta
+    function aplastador(x, ancho, desfase) {
+      nivel.aplastadores.push({ x: x, w: ancho, h: 90, y: 110, t: desfase, mx: 0, my: 0, suelo: SUELO });
+    }
+    function estrella(x, y) {
+      nivel.estrellas.push({ x: x, y: y, tomada: false });
+    }
+    function checkpoint(x, y = SUELO) {
+      nivel.checkpoints.push({ x: x, y: y, activo: false });
+    }
+    function meta(x, y = SUELO) {
+      nivel.meta = { x: x, y: y };
+    }
+    function jefe(x) {
+      nivel.jefe = { x: x, y: SUELO - 110, w: 110, h: 110, vx: 0, vy: 0, vida: 3, golpeado: 0,
+                     salto: 150, enSuelo: true, derrotado: 0, x0: x };
+    }
+
+    // 7. LOS NIVELES
+    const NIVELES = [
+      { nombre: "La pradera", tema: "dia", ancho: 3500, construir: () => {
+        suelo(0, 1200);
+        estrella(500, 380);
+        enemigo(700, 1000);
+        suelo(1350, 800);                         // hueco de 1200 a 1350
+        checkpoint(1450);
+        plataforma(1600, 360, 160);
+        estrella(1680, 310);
+        enemigo(1850, 2100);
+        suelo(2300, 1200);                        // otro hueco
+        plataforma(2500, 380, 120);
+        plataforma(2700, 290, 120);
+        estrella(2760, 240);
+        meta(3300);
+      }},
+      { nombre: "Colinas y rampas", tema: "dia", ancho: 4300, construir: () => {
+        suelo(0, 600);
+        rampa(600, 480, 900, 330);                // subida
+        suelo(900, 300, 330);
+        estrella(1050, 260);
+        rampa(1200, 330, 1600, 480);              // bajada (¡agarras velocidad!)
+        suelo(1600, 500);
+        checkpoint(1700);
+        estrella(2175, 360);                      // sobre el hueco
+        suelo(2250, 400);
+        rampa(2650, 480, 2950, 380);
+        suelo(2950, 200, 380);
+        estrella(3050, 300);
+        suelo(3350, 950);
+        enemigo(3500, 3900);
+        meta(4100);
+      }},
+      { nombre: "El campo de pinchos", tema: "dia", ancho: 3800, construir: () => {
+        suelo(0, 3800);
+        pinchos(600, SUELO, 3);
+        pinchos(1000, SUELO, 5);
+        pinchos(1220, SUELO, 16);
+        plataforma(1300, 370, 160);
+        estrella(1380, 310);
+        checkpoint(1700);
+        enemigo(1800, 2100);
+        estrella(1950, 380);
+        pinchos(2300, SUELO, 4);
+        pinchos(2440, SUELO, 22);
+        plataforma(2520, 370, 120);
+        plataforma(2740, 300, 120);
+        estrella(2800, 245);
+        pinchos(3200, SUELO, 3);
+        meta(3600);
+      }},
+      { nombre: "Empuja la caja", tema: "atardecer", ancho: 4300, construir: () => {
+        suelo(0, 1000);
+        caja(650);                                // empújala hasta el escalón
+        suelo(1000, 500, 330);                    // escalón muy alto
+        estrella(1250, 250);
+        suelo(1500, 700);
+        checkpoint(1600);
+        enemigo(1650, 2150);
+        suelo(2200, 800);
+        caja(2450);
+        plataforma(2650, 320, 150);
+        estrella(2725, 265);
+        suelo(3000, 500, 330);
+        estrella(3300, 250);
+        suelo(3500, 800);
+        meta(4050);
+      }},
+      { nombre: "Plataformas que se mueven", tema: "atardecer", ancho: 4800, construir: () => {
+        suelo(0, 700);
+        movil(760, 440, 150, 540, 0, 300);
+        estrella(1100, 340);
+        suelo(1500, 600);
+        checkpoint(1560);
+        enemigo(1700, 2050);
+        plataforma(2150, 400, 110);
+        movil(2330, 420, 120, 0, -200, 240);      // sube y baja
+        plataforma(2520, 230, 160);
+        estrella(2600, 175);
+        suelo(2800, 700);
+        pinchos(3100, SUELO, 4);
+        movil(3550, 440, 150, 450, 0, 300);
+        estrella(3800, 340);
+        suelo(4200, 600);
+        meta(4550);
+      }},
+      { nombre: "Los aplastadores", tema: "atardecer", ancho: 4200, construir: () => {
+        suelo(0, 4200);
+        aplastador(600, 110, 0);
+        aplastador(1000, 110, 50);
+        estrella(1055, 440);                      // debajo del aplastador... ¡con cuidado!
+        enemigo(1300, 1600);
+        checkpoint(1750);
+        aplastador(2000, 150, 80);
+        pinchos(2300, SUELO, 3);
+        aplastador(2600, 110, 0);
+        aplastador(2760, 110, 40);
+        estrella(2815, 440);
+        plataforma(3200, 390, 160);
+        estrella(3280, 330);
+        meta(3900);
+      }},
+      { nombre: "Un poco de todo", tema: "noche", ancho: 4800, construir: () => {
+        suelo(0, 800);
+        rampa(800, 480, 1100, 360);
+        suelo(1100, 300, 360);
+        estrella(1250, 290);
+        suelo(1650, 500);                         // hueco de 1400 a 1650
+        checkpoint(1700);
+        pinchos(1830, SUELO, 4);
+        enemigo(1950, 2130);
+        movil(2200, 440, 130, 520, 0, 280);
+        estrella(2520, 340);
+        suelo(2900, 800);
+        aplastador(3080, 110, 0);
+        caja(3350);
+        suelo(3700, 400, 330);
+        estrella(3900, 260);
+        suelo(4100, 700);
+        enemigo(4200, 4500);
+        meta(4600);
+      }},
+      { nombre: "La noche oscura", tema: "noche", ancho: 5400, construir: () => {
+        suelo(0, 600);
+        pinchos(380, SUELO, 3);
+        estrella(700, 330);                       // sobre el hueco
+        suelo(800, 500);
+        enemigo(900, 1250);
+        rampa(1300, 480, 1600, 330);
+        suelo(1600, 200, 330);
+        estrella(1700, 260);
+        suelo(2000, 600);
+        checkpoint(2050);
+        aplastador(2200, 110, 0);
+        aplastador(2420, 110, 60);
+        movil(2650, 440, 130, 500, 0, 280);
+        suelo(3300, 900);
+        pinchos(3430, SUELO, 3);
+        enemigo(3600, 3880);
+        caja(3950);
+        suelo(4200, 400, 330);
+        estrella(4400, 250);
+        suelo(4600, 700);
+        pinchos(4780, SUELO, 5);
+        meta(5100);
+      }},
+      { nombre: "¡EL JEFE CUADRADO!", tema: "jefe", ancho: 1600, construir: () => {
+        muro(-60, 60);
+        muro(1600, 60);
+        suelo(0, 1600);
+        plataforma(300, 330, 160);
+        plataforma(1140, 330, 160);
+        estrella(380, 270);
+        estrella(1220, 270);
+        estrella(800, 200);                       // salta sobre el jefe para alcanzarla
+        jefe(1200);
+      }}
+    ];
+
+    // 8. EMPEZAR PARTIDA Y NIVELES
+    function nuevaPartida() {
+      vidas = VIDAS_INICIALES;
+      estrellasNivel = [];
+      cargarNivel(0);
+    }
+
+    function cargarNivel(i) {
+      numNivel = i;
+      nivel = { solidos: [], pinchos: [], enemigos: [], cajas: [], moviles: [], aplastadores: [],
+                estrellas: [], checkpoints: [], meta: null, jefe: null, ancho: NIVELES[i].ancho };
+      NIVELES[i].construir();
+
+      // Guardar todos los bordes de los sólidos (para los choques de la bolita)
+      nivel.segmentos = [];
+      for (let s of nivel.solidos) {
+        let p = s.puntos;
+        for (let k = 0; k < p.length; k++) {
+          nivel.segmentos.push(crearSegmento(p[k], p[(k + 1) % p.length]));
+        }
+        // Rectángulo que envuelve al sólido (para los choques de las cajas)
+        let xs = p.map(q => q.x), ys = p.map(q => q.y);
+        s.caja = { x1: Math.min(...xs), x2: Math.max(...xs), y1: Math.min(...ys), y2: Math.max(...ys) };
+      }
+
+      reaparecer = { x: 120, y: SUELO - 60 };
+      ponerBolaEn(reaparecer);
+      estrellasTomadas = 0;
+      muriendo = 0;
+      invencible = 0;
+      molesto = 0;
+      temblor = 0;
+      camX = 0;
+      estado = "aviso";
+      avisoCuadros = 100;
+    }
+
+    function ponerBolaEn(lugar) {
+      bola.x = lugar.x;
+      bola.y = lugar.y;
+      bola.vx = 0;
+      bola.vy = 0;
+      bola.sobre = null;
+    }
+
+    function crearSegmento(a, b) {
+      return { ax: a.x, ay: a.y, bx: b.x, by: b.y,
+               minX: Math.min(a.x, b.x), maxX: Math.max(a.x, b.x),
+               minY: Math.min(a.y, b.y), maxY: Math.max(a.y, b.y) };
+    }
+
+    function segmentosDeRect(x, y, w, h) {
+      let p = puntosDeRect(x, y, w, h);
+      return [crearSegmento(p[0], p[1]), crearSegmento(p[1], p[2]), crearSegmento(p[2], p[3]), crearSegmento(p[3], p[0])];
+    }
+
+    // 9. CHOQUES
+    // Empuja la bolita fuera de un borde. Devuelve hacia dónde la empujó (o null si no chocó).
+    function chocarSegmento(s, conRebote = true) {
+      let r = bola.r;
+      if (bola.x + r < s.minX || bola.x - r > s.maxX || bola.y + r < s.minY || bola.y - r > s.maxY) return null;
+
+      // El punto del borde más cercano al centro de la bolita
+      let dx = s.bx - s.ax, dy = s.by - s.ay;
+      let t = ((bola.x - s.ax) * dx + (bola.y - s.ay) * dy) / (dx * dx + dy * dy);
+      t = Math.max(0, Math.min(1, t));
+      let px = s.ax + t * dx, py = s.ay + t * dy;
+      let ex = bola.x - px, ey = bola.y - py;
+      let distancia = Math.hypot(ex, ey);
+      if (distancia >= r || distancia < 0.0001) return null;
+
+      // Sacar la bolita del borde
+      let nx = ex / distancia, ny = ey / distancia;
+      bola.x += nx * (r - distancia);
+      bola.y += ny * (r - distancia);
+
+      // Quitar la velocidad que va contra el borde (y rebotar un poquito en las paredes)
+      let vn = bola.vx * nx + bola.vy * ny;
+      if (vn < 0) {
+        let rebote = (conRebote && Math.abs(nx) > 0.7 && vn < -3) ? 0.3 : 0;
+        bola.vx -= (1 + rebote) * vn * nx;
+        bola.vy -= (1 + rebote) * vn * ny;
+      }
+      return { x: nx, y: ny };
+    }
+
+    // ¿Un círculo toca un rectángulo?
+    function circuloTocaRect(cx, cy, r, x, y, w, h) {
+      let px = Math.max(x, Math.min(cx, x + w));
+      let py = Math.max(y, Math.min(cy, y + h));
+      return Math.hypot(cx - px, cy - py) < r;
+    }
+
+    function seTocan(a, b) {
+      return a.x < b.x2 - 0.01 && a.x + a.w > b.x1 + 0.01 && a.y < b.y2 - 0.01 && a.y + a.h > b.y1 + 0.01;
+    }
+
+    // 10. PERDER UNA VIDA
+    function morir(aunqueSeaInvencible) {
+      if (muriendo > 0) return;
+      if (invencible > 0 && !aunqueSeaInvencible) return;
+      vidas--;
+      muriendo = 60;
+      molesto = 120;
+      temblor = 10;
+    }
+
+    function despuesDeMorir() {
+      if (vidas <= 0) {
+        estado = "perdido";
+        return;
+      }
+      ponerBolaEn(reaparecer);
+      invencible = 90;
+      // En el nivel del jefe, el jefe vuelve a su lugar
+      let j = nivel.jefe;
+      if (j && j.vida > 0) {
+        j.x = j.x0; j.y = SUELO - j.h; j.vx = 0; j.vy = 0; j.salto = 150;
+      }
+    }
+
+    // 11. ACTUALIZAR (mover todo y revisar choques)
+    function actualizar() {
+      actualizarMoviles();
+      actualizarAplastadores();
+      actualizarCajas();
+      actualizarEnemigos();
+      if (nivel.jefe) actualizarJefe();
+
+      if (muriendo > 0) {
+        muriendo--;
+        if (muriendo === 0) despuesDeMorir();
+      } else {
+        // ¿Te aplastó un aplastador mientras caía?
+        for (let a of nivel.aplastadores) {
+          let fase = a.t % 160;
+          if (fase >= 70 && fase <= 84 && circuloTocaRect(bola.x, bola.y, bola.r - 2, a.x, a.y, a.w, a.h)) morir();
+        }
+        if (muriendo === 0) {
+          actualizarBola();
+          revisarPeligrosYPremios();
+        }
+      }
+
+      if (invencible > 0) invencible--;
+      if (molesto > 0) molesto--;
+      if (temblor > 0) temblor--;
+
+      // La cámara sigue a la bolita
+      let objetivo = bola.x - vistaAncho * 0.4;
+      camX += (objetivo - camX) * 0.1;
+      camX = Math.max(0, Math.min(camX, nivel.ancho - vistaAncho));
+      if (nivel.ancho < vistaAncho) camX = (nivel.ancho - vistaAncho) / 2;
+    }
+
+    function actualizarBola() {
+      // Rodar con las flechas (o A y D)
+      let izquierda = teclas["ArrowLeft"] || teclas["KeyA"];
+      let derecha = teclas["ArrowRight"] || teclas["KeyD"];
+      let aceleracion = bola.enSuelo ? 0.5 : 0.35;
+      if (izquierda && bola.vx > -VELOCIDAD_MAX) bola.vx -= aceleracion;
+      if (derecha && bola.vx < VELOCIDAD_MAX) bola.vx += aceleracion;
+      if (!izquierda && !derecha) bola.vx *= bola.enSuelo ? 0.93 : 0.99;
+      if (izquierda) bola.mira = -1;
+      if (derecha) bola.mira = 1;
+
+      // Saltar (se puede un momentito después de dejar el piso)
+      if (bola.enSuelo) bola.coyote = 6;
+      else if (bola.coyote > 0) bola.coyote--;
+      if (bufferSalto > 0) {
+        bufferSalto--;
+        if (bola.coyote > 0) {
+          bola.vy = -FUERZA_SALTO;
+          bola.coyote = 0;
+          bufferSalto = 0;
+          bola.sobre = null;
+        }
+      }
+
+      // Gravedad
+      bola.vy = Math.min(bola.vy + GRAVEDAD, 16);
+      bola.vx = Math.max(-14, Math.min(bola.vx, 14));
+
+      // Si está parada sobre algo que se mueve, se mueve con eso
+      if (bola.sobre) {
+        bola.x += bola.sobre.mx;
+        bola.y += bola.sobre.my;
+      }
+
+      // Moverse en 2 pasitos para no atravesar paredes
+      let vxAntes = bola.vx;
+      bola.enSuelo = false;
+      let nuevoSobre = null;
+      for (let paso = 0; paso < 2; paso++) {
+        bola.x += bola.vx / 2;
+        bola.y += bola.vy / 2;
+
+        for (let s of nivel.segmentos) {
+          let n = chocarSegmento(s);
+          if (n && n.y < -0.5) { bola.enSuelo = true; nuevoSobre = null; }
+        }
+        for (let m of nivel.moviles) {
+          for (let s of segmentosDeRect(m.x, m.y, m.w, m.h)) {
+            let n = chocarSegmento(s);
+            if (n && n.y < -0.5) { bola.enSuelo = true; nuevoSobre = m; }
+          }
+        }
+        for (let a of nivel.aplastadores) {
+          for (let s of segmentosDeRect(a.x, a.y, a.w, a.h)) {
+            let n = chocarSegmento(s);
+            if (n && n.y < -0.5) { bola.enSuelo = true; nuevoSobre = a; }
+          }
+        }
+        for (let c of nivel.cajas) {
+          for (let s of segmentosDeRect(c.x, c.y, c.w, c.h)) {
+            let n = chocarSegmento(s, false);
+            if (!n) continue;
+            if (n.y < -0.5) { bola.enSuelo = true; nuevoSobre = null; }
+            else if (Math.abs(n.x) > 0.7) {
+              // Empujar la caja: la bolita y la caja avanzan juntas, más despacio
+              bola.vx = -n.x * Math.min(Math.abs(vxAntes), 3);
+              c.empuje = bola.vx;
+            }
+          }
+        }
+      }
+      bola.sobre = nuevoSobre;
+
+      // Girar según lo que rueda
+      bola.angulo += bola.vx / bola.r;
+    }
+
+    function actualizarMoviles() {
+      for (let m of nivel.moviles) {
+        m.t++;
+        let f = 0.5 - 0.5 * Math.cos(m.t / m.periodo * Math.PI * 2);
+        let nx = m.x0 + m.dx * f, ny = m.y0 + m.dy * f;
+        m.mx = nx - m.x;
+        m.my = ny - m.y;
+        m.x = nx;
+        m.y = ny;
+      }
+    }
+
+    // Los aplastadores: esperan arriba, caen rápido, esperan abajo y suben despacio
+    function actualizarAplastadores() {
+      const ARRIBA = 110;
+      for (let a of nivel.aplastadores) {
+        a.t++;
+        let fase = a.t % 160;
+        let abajo = a.suelo - a.h;
+        let y;
+        if (fase < 70) y = ARRIBA;
+        else if (fase < 82) y = ARRIBA + (abajo - ARRIBA) * Math.pow((fase - 70) / 12, 2);
+        else if (fase < 122) y = abajo;
+        else y = abajo - (abajo - ARRIBA) * ((fase - 122) / 38);
+        a.mx = 0;
+        a.my = y - a.y;
+        a.y = y;
+        // Tiembla la pantalla si cae cerca de la bolita
+        if (fase === 82 && Math.abs(a.x - bola.x) < 500) temblor = 8;
+      }
+    }
+
+    function actualizarCajas() {
+      for (let c of nivel.cajas) {
+        c.vx = c.empuje;
+        c.empuje = 0;
+        c.vy = Math.min(c.vy + GRAVEDAD, 16);
+
+        // Con qué puede chocar la caja: los sólidos y las otras cajas
+        let obstaculos = nivel.solidos.map(s => s.caja);
+        for (let otra of nivel.cajas) {
+          if (otra !== c) obstaculos.push({ x1: otra.x, x2: otra.x + otra.w, y1: otra.y, y2: otra.y + otra.h });
+        }
+
+        // Moverse de lado
+        c.x += c.vx;
+        for (let o of obstaculos) {
+          if (seTocan(c, o)) {
+            if (c.vx > 0) c.x = o.x1 - c.w;
+            else if (c.vx < 0) c.x = o.x2;
+          }
+        }
+        // Caer
+        c.y += c.vy;
+        for (let o of obstaculos) {
+          if (seTocan(c, o)) {
+            if (c.vy > 0) c.y = o.y1 - c.h;
+            else c.y = o.y2;
+            c.vy = 0;
+          }
+        }
+        // Si se cae a un hueco, vuelve a su lugar
+        if (c.y > FONDO_MUNDO) {
+          c.x = c.x0;
+          c.y = c.y0;
+          c.vy = 0;
+        }
+      }
+    }
+
+    function actualizarEnemigos() {
+      for (let e of nivel.enemigos) {
+        if (!e.vivo) {
+          if (e.aplastado > 0) e.aplastado--;
+          continue;
+        }
+        e.x += e.v;
+        if (e.x < e.x1 || e.x + e.t > e.x2) e.v = -e.v;
+      }
+    }
+
+    function actualizarJefe() {
+      let j = nivel.jefe;
+      if (j.vida <= 0) {
+        // Animación de derrota, y luego aparece la bandera
+        if (j.derrotado < 90) {
+          j.derrotado++;
+          if (j.derrotado === 90) meta(800);
+        }
+        return;
+      }
+      if (j.golpeado > 0) j.golpeado--;
+
+      // Camina hacia la bolita (más rápido cuando está más enojado)
+      let enojo = 3 - j.vida;
+      let direccion = Math.sign(bola.x - (j.x + j.w / 2));
+      if (j.enSuelo) j.vx = direccion * (1.2 + enojo * 0.6);
+
+      // Cada cierto tiempo da un salto gigante
+      j.salto--;
+      if (j.salto <= 0 && j.enSuelo) {
+        j.vy = -13 - enojo;
+        j.salto = 140 - enojo * 25;
+        j.enSuelo = false;
+      }
+
+      j.vy += GRAVEDAD;
+      j.x += j.vx;
+      j.y += j.vy;
+      if (j.y + j.h >= SUELO) {
+        if (!j.enSuelo && j.vy > 3) temblor = 12;   // ¡PUM!
+        j.y = SUELO - j.h;
+        j.vy = 0;
+        j.enSuelo = true;
+      }
+      j.x = Math.max(0, Math.min(j.x, nivel.ancho - j.w));
+    }
+
+    function revisarPeligrosYPremios() {
+      // Caerse a un hueco
+      if (bola.y - bola.r > FONDO_MUNDO) {
+        morir(true);
+        return;
+      }
+
+      // Pinchos
+      for (let p of nivel.pinchos) {
+        if (circuloTocaRect(bola.x, bola.y, bola.r, p.x + 3, p.y - 16, p.n * 20 - 6, 16)) morir();
+      }
+
+      // Cuadrados malvados: si les caes encima los aplastas, si te tocan de lado pierdes
+      for (let e of nivel.enemigos) {
+        if (!e.vivo) continue;
+        if (circuloTocaRect(bola.x, bola.y, bola.r, e.x, e.y, e.t, e.t)) {
+          if (bola.vy > 1 && bola.y < e.y + 5) {
+            e.vivo = false;
+            e.aplastado = 40;
+            bola.vy = -9;
+          } else {
+            morir();
+          }
+        }
+      }
+
+      // El jefe: hay que saltarle encima 3 veces
+      let j = nivel.jefe;
+      if (j && j.vida > 0 && circuloTocaRect(bola.x, bola.y, bola.r, j.x, j.y, j.w, j.h)) {
+        if (bola.vy > 0 && bola.y < j.y + 15) {
+          if (j.golpeado === 0) {
+            j.vida--;
+            j.golpeado = 90;
+            temblor = 10;
+          }
+          bola.vy = -14;
+          bola.vx = bola.x < j.x + j.w / 2 ? -5 : 5;
+        } else if (j.golpeado === 0) {
+          morir();
+        }
+      }
+
+      // Estrellas
+      for (let s of nivel.estrellas) {
+        if (!s.tomada && Math.hypot(bola.x - s.x, bola.y - s.y) < bola.r + 14) {
+          s.tomada = true;
+          estrellasTomadas++;
+        }
+      }
+
+      // Banderas de guardado
+      for (let c of nivel.checkpoints) {
+        if (!c.activo && bola.x > c.x) {
+          c.activo = true;
+          reaparecer = { x: c.x, y: c.y - 60 };
+        }
+      }
+
+      // Bandera de meta
+      let m = nivel.meta;
+      if (m && Math.abs(bola.x - m.x) < 30 && bola.y > m.y - 170 && bola.y < m.y + 10) {
+        estrellasNivel[numNivel] = Math.max(estrellasNivel[numNivel] || 0, estrellasTomadas);
+        estado = "nivelCompleto";
+      }
+    }
+
+    function totalEstrellas() {
+      let total = 0;
+      for (let e of estrellasNivel) total += e || 0;
+      return total;
+    }
+
+    // 12. FONDOS (el cielo y las colinas se mueven más lento que el mundo: parece profundo)
+    const TEMAS = {
+      dia:       { cielo: ["#5ec8ff", "#c9f0ff"], lejos: "#8fd18a", cerca: "#5fb35a", tierra: "#8d5524", pasto: "#4caf50", astro: "sol" },
+      atardecer: { cielo: ["#ff9966", "#ffd6a5"], lejos: "#d98b5f", cerca: "#b5653a", tierra: "#7a4a2a", pasto: "#6aa84f", astro: "atardecer" },
+      noche:     { cielo: ["#0b1a3a", "#2c3e70"], lejos: "#1d2b53", cerca: "#14203f", tierra: "#4a3222", pasto: "#2e7d32", astro: "luna" },
+      jefe:      { cielo: ["#2a0000", "#6b1010"], lejos: "#3b0d0d", cerca: "#250808", tierra: "#3e2a22", pasto: "#556b2f", astro: "lunaRoja" }
+    };
+
+    // Nubes y estrellas del cielo (siempre en el mismo lugar)
+    const NUBES = [];
+    for (let i = 0; i < 8; i++) NUBES.push({ x: i * 330 + Math.random() * 150, y: 0.06 + Math.random() * 0.22, s: 0.7 + Math.random() * 0.6 });
+    const ESTRELLAS_CIELO = [];
+    for (let i = 0; i < 120; i++) ESTRELLAS_CIELO.push({ x: Math.random(), y: Math.random() * 0.6, s: 1 + Math.random() * 1.5 });
+
+    function dibujarFondo(tema) {
+      let W = canvas.width, H = canvas.height;
+      let desplazamiento = camX * escala;
+
+      let degradado = ctx.createLinearGradient(0, 0, 0, H);
+      degradado.addColorStop(0, tema.cielo[0]);
+      degradado.addColorStop(1, tema.cielo[1]);
+      ctx.fillStyle = degradado;
+      ctx.fillRect(0, 0, W, H);
+
+      // Estrellas del cielo
+      if (tema.astro === "luna" || tema.astro === "lunaRoja") {
+        for (let e of ESTRELLAS_CIELO) {
+          ctx.fillStyle = "rgba(255, 255, 255, " + (0.5 + 0.5 * Math.sin(cuadro * 0.03 + e.x * 50)) + ")";
+          ctx.fillRect(e.x * W, e.y * H, e.s, e.s);
+        }
+      }
+
+      // Sol o luna
+      let ax = W * 0.8, ay = H * 0.18, ar = H * 0.07;
+      let colores = { sol: "#fff176", atardecer: "#ffcc80", luna: "#fdf6e3", lunaRoja: "#ff3b3b" };
+      let brillo = ctx.createRadialGradient(ax, ay, ar * 0.5, ax, ay, ar * 2.5);
+      brillo.addColorStop(0, colores[tema.astro]);
+      brillo.addColorStop(1, "rgba(255, 255, 255, 0)");
+      ctx.fillStyle = brillo;
+      ctx.beginPath();
+      ctx.arc(ax, ay, ar * 2.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = colores[tema.astro];
+      ctx.beginPath();
+      ctx.arc(ax, ay, ar, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Nubes (solo de día y al atardecer)
+      if (tema.astro === "sol" || tema.astro === "atardecer") {
+        ctx.fillStyle = "rgba(255, 255, 255, 0.85)";
+        let vuelta = W + 400;
+        for (let n of NUBES) {
+          let x = ((n.x * escala - desplazamiento * 0.15) % vuelta + vuelta) % vuelta - 200;
+          let y = n.y * H, s = 28 * n.s * escala;
+          ctx.beginPath();
+          ctx.arc(x, y, s, 0, Math.PI * 2);
+          ctx.arc(x + s, y - s * 0.4, s * 1.1, 0, Math.PI * 2);
+          ctx.arc(x + s * 2, y, s * 0.9, 0, Math.PI * 2);
+          ctx.arc(x + s, y + s * 0.2, s, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+
+      // Colinas lejanas y cercanas
+      colinaFondo(tema.lejos, 0.55, 40, 260, desplazamiento * 0.2);
+      colinaFondo(tema.cerca, 0.68, 30, 170, desplazamiento * 0.4);
+    }
+
+    function colinaFondo(color, base, altura, largo, corrimiento) {
+      let W = canvas.width, H = canvas.height;
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.moveTo(0, H);
+      for (let x = 0; x <= W + 8; x += 8) {
+        let wx = (x + corrimiento) / escala;
+        ctx.lineTo(x, H * base + (Math.sin(wx / largo) + Math.sin(wx / (largo * 0.37)) * 0.3) * altura * escala);
+      }
+      ctx.lineTo(W, H);
+      ctx.closePath();
+      ctx.fill();
+    }
+
+    // 13. DIBUJAR LAS COSAS DEL MUNDO
+    function rectRedondo(x, y, w, h, r) {
+      ctx.beginPath();
+      ctx.moveTo(x + r, y);
+      ctx.arcTo(x + w, y, x + w, y + h, r);
+      ctx.arcTo(x + w, y + h, x, y + h, r);
+      ctx.arcTo(x, y + h, x, y, r);
+      ctx.arcTo(x, y, x + w, y, r);
+      ctx.closePath();
+    }
+
+    function dibujarSolidos(tema) {
+      for (let s of nivel.solidos) {
+        let p = s.puntos;
+        ctx.beginPath();
+        ctx.moveTo(p[0].x, p[0].y);
+        for (let k = 1; k < p.length; k++) ctx.lineTo(p[k].x, p[k].y);
+        ctx.closePath();
+
+        if (s.tipo === "muro") {
+          ctx.fillStyle = "#3a3a3a";
+          ctx.fill();
+          continue;
+        }
+        ctx.fillStyle = s.tipo === "plataforma" ? "#6d4c41" : tema.tierra;
+        ctx.fill();
+
+        // Piedritas en la tierra
+        if (s.tipo === "tierra") {
+          ctx.save();
+          ctx.clip();
+          ctx.fillStyle = "rgba(0, 0, 0, 0.15)";
+          for (let x = s.caja.x1 + 20; x < s.caja.x2; x += 70) {
+            for (let y = s.caja.y1 + 40; y < FONDO_MUNDO; y += 55) {
+              ctx.beginPath();
+              ctx.arc(x + ((y * 7) % 30), y, 5, 0, Math.PI * 2);
+              ctx.fill();
+            }
+          }
+          ctx.restore();
+        }
+
+        // Pasto en el borde de arriba (el primer borde siempre es el de arriba)
+        ctx.strokeStyle = tema.pasto;
+        ctx.lineWidth = 12;
+        ctx.lineCap = "round";
+        ctx.beginPath();
+        ctx.moveTo(p[0].x, p[0].y + 4);
+        ctx.lineTo(p[1].x, p[1].y + 4);
+        ctx.stroke();
+        ctx.strokeStyle = "rgba(255, 255, 255, 0.25)";
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(p[0].x, p[0].y + 1);
+        ctx.lineTo(p[1].x, p[1].y + 1);
+        ctx.stroke();
+        ctx.lineCap = "butt";
+      }
+    }
+
+    function dibujarPinchos() {
+      ctx.fillStyle = "#cfd8dc";
+      ctx.strokeStyle = "#455a64";
+      ctx.lineWidth = 2;
+      for (let p of nivel.pinchos) {
+        for (let i = 0; i < p.n; i++) {
+          let x = p.x + i * 20;
+          ctx.beginPath();
+          ctx.moveTo(x, p.y);
+          ctx.lineTo(x + 10, p.y - 20);
+          ctx.lineTo(x + 20, p.y);
+          ctx.closePath();
+          ctx.fill();
+          ctx.stroke();
+        }
+      }
+    }
+
+    // Ojos que miran hacia un punto
+    function ojos(x1, x2, y, r, haciaX, haciaY, colorPupila) {
+      ctx.fillStyle = "white";
+      ctx.beginPath();
+      ctx.arc(x1, y, r, 0, Math.PI * 2);
+      ctx.arc(x2, y, r, 0, Math.PI * 2);
+      ctx.fill();
+      let ang = Math.atan2(haciaY - y, haciaX - (x1 + x2) / 2);
+      ctx.fillStyle = colorPupila;
+      ctx.beginPath();
+      ctx.arc(x1 + Math.cos(ang) * r * 0.4, y + Math.sin(ang) * r * 0.4, r * 0.5, 0, Math.PI * 2);
+      ctx.arc(x2 + Math.cos(ang) * r * 0.4, y + Math.sin(ang) * r * 0.4, r * 0.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    function dibujarEnemigos() {
+      for (let e of nivel.enemigos) {
+        if (!e.vivo) {
+          // Aplastado: queda plano y se desvanece
+          if (e.aplastado > 0) {
+            ctx.fillStyle = "rgba(20, 20, 20, " + e.aplastado / 40 + ")";
+            ctx.fillRect(e.x - 5, e.y + e.t - 10, e.t + 10, 10);
+          }
+          continue;
+        }
+        let salto = Math.abs(Math.sin(cuadro * 0.15)) * 3;   // camina dando saltitos
+        let y = e.y - salto;
+        ctx.fillStyle = "#151515";
+        rectRedondo(e.x, y, e.t, e.t, 5);
+        ctx.fill();
+        ojos(e.x + 12, e.x + 28, y + 16, 5.5, bola.x, bola.y, "black");
+        // Cejas enojadas
+        ctx.strokeStyle = "#e0e0e0";
+        ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        ctx.moveTo(e.x + 5, y + 6);   ctx.lineTo(e.x + 17, y + 10);
+        ctx.moveTo(e.x + 35, y + 6);  ctx.lineTo(e.x + 23, y + 10);
+        ctx.stroke();
+        // Boca enojada
+        ctx.beginPath();
+        ctx.moveTo(e.x + 13, y + 31);
+        ctx.lineTo(e.x + 27, y + 31);
+        ctx.stroke();
+      }
+    }
+
+    function dibujarCajas() {
+      for (let c of nivel.cajas) {
+        ctx.fillStyle = "#c68642";
+        ctx.fillRect(c.x, c.y, c.w, c.h);
+        ctx.strokeStyle = "#6d4417";
+        ctx.lineWidth = 4;
+        ctx.strokeRect(c.x + 2, c.y + 2, c.w - 4, c.h - 4);
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(c.x + 4, c.y + 4);         ctx.lineTo(c.x + c.w - 4, c.y + c.h - 4);
+        ctx.moveTo(c.x + c.w - 4, c.y + 4);   ctx.lineTo(c.x + 4, c.y + c.h - 4);
+        ctx.stroke();
+      }
+    }
+
+    function dibujarMoviles() {
+      for (let m of nivel.moviles) {
+        ctx.fillStyle = "#7e57c2";
+        rectRedondo(m.x, m.y, m.w, m.h, 6);
+        ctx.fill();
+        ctx.fillStyle = "#b39ddb";
+        ctx.fillRect(m.x + 6, m.y + 3, m.w - 12, 4);
+        // tornillos
+        ctx.fillStyle = "#4527a0";
+        ctx.beginPath();
+        ctx.arc(m.x + 10, m.y + 13, 3, 0, Math.PI * 2);
+        ctx.arc(m.x + m.w - 10, m.y + 13, 3, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    function dibujarAplastadores() {
+      for (let a of nivel.aplastadores) {
+        let fase = a.t % 160;
+        let x = a.x;
+        if (fase > 52 && fase < 70) x += Math.sin(cuadro * 2) * 2;   // tiembla antes de caer (¡aviso!)
+
+        // Cadena
+        ctx.strokeStyle = "#78909c";
+        ctx.lineWidth = 4;
+        ctx.setLineDash([8, 5]);
+        ctx.beginPath();
+        ctx.moveTo(x + a.w / 2, -50);
+        ctx.lineTo(x + a.w / 2, a.y);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Bloque
+        ctx.fillStyle = "#546e7a";
+        ctx.strokeStyle = "#263238";
+        ctx.lineWidth = 3;
+        ctx.fillRect(x, a.y, a.w, a.h - 12);
+        ctx.strokeRect(x, a.y, a.w, a.h - 12);
+        // Dientes de abajo
+        ctx.fillStyle = "#cfd8dc";
+        ctx.beginPath();
+        for (let dx = 0; dx < a.w; dx += 14) {
+          ctx.moveTo(x + dx, a.y + a.h - 12);
+          ctx.lineTo(x + dx + 7, a.y + a.h);
+          ctx.lineTo(x + Math.min(dx + 14, a.w), a.y + a.h - 12);
+        }
+        ctx.fill();
+        // Cara enojada
+        ojos(x + a.w / 2 - 14, x + a.w / 2 + 14, a.y + 32, 7, bola.x, bola.y, "#b71c1c");
+        ctx.strokeStyle = "#111";
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(x + a.w / 2 - 24, a.y + 18);  ctx.lineTo(x + a.w / 2 - 8, a.y + 25);
+        ctx.moveTo(x + a.w / 2 + 24, a.y + 18);  ctx.lineTo(x + a.w / 2 + 8, a.y + 25);
+        ctx.stroke();
+      }
+    }
+
+    function dibujarEstrella(x, y, r, giro, relleno, borde) {
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.rotate(giro);
+      ctx.beginPath();
+      for (let i = 0; i < 10; i++) {
+        let radio = i % 2 === 0 ? r : r * 0.45;
+        let ang = -Math.PI / 2 + i * Math.PI / 5;
+        ctx.lineTo(Math.cos(ang) * radio, Math.sin(ang) * radio);
+      }
+      ctx.closePath();
+      ctx.fillStyle = relleno;
+      ctx.fill();
+      ctx.strokeStyle = borde;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function dibujarEstrellas() {
+      for (let s of nivel.estrellas) {
+        if (s.tomada) continue;
+        dibujarEstrella(s.x, s.y + Math.sin(cuadro * 0.06 + s.x) * 4, 15, Math.sin(cuadro * 0.04) * 0.3, "#ffd700", "#b8860b");
+      }
+    }
+
+    function dibujarBanderas() {
+      for (let c of nivel.checkpoints) {
+        ctx.strokeStyle = "#9e9e9e";
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.moveTo(c.x, c.y);
+        ctx.lineTo(c.x, c.y - 90);
+        ctx.stroke();
+        ctx.fillStyle = c.activo ? "#43a047" : "#bdbdbd";
+        ctx.beginPath();
+        ctx.moveTo(c.x + 2, c.y - 90);
+        ctx.lineTo(c.x + 42, c.y - 78 + Math.sin(cuadro * 0.1) * 3);
+        ctx.lineTo(c.x + 2, c.y - 64);
+        ctx.fill();
+      }
+
+      let m = nivel.meta;
+      if (m) {
+        // Palo
+        ctx.strokeStyle = "#eeeeee";
+        ctx.lineWidth = 6;
+        ctx.beginPath();
+        ctx.moveTo(m.x, m.y);
+        ctx.lineTo(m.x, m.y - 170);
+        ctx.stroke();
+        ctx.fillStyle = "#ffd700";
+        ctx.beginPath();
+        ctx.arc(m.x, m.y - 172, 7, 0, Math.PI * 2);
+        ctx.fill();
+        // Bandera de cuadritos
+        let ondita = Math.sin(cuadro * 0.1) * 3;
+        for (let fila = 0; fila < 4; fila++) {
+          for (let col = 0; col < 6; col++) {
+            ctx.fillStyle = (fila + col) % 2 === 0 ? "#111" : "#fff";
+            ctx.fillRect(m.x + 3 + col * 11, m.y - 165 + fila * 11 + ondita * col / 6, 11, 11);
+          }
+        }
+      }
+    }
+
+    function dibujarJefe() {
+      let j = nivel.jefe;
+      if (!j) return;
+      if (j.vida <= 0) {
+        // Se encoge y desaparece
+        if (j.derrotado >= 90) return;
+        let f = 1 - j.derrotado / 90;
+        ctx.save();
+        ctx.translate(j.x + j.w / 2, j.y + j.h);
+        ctx.scale(f, f);
+        ctx.rotate(j.derrotado * 0.1);
+        ctx.fillStyle = "#111";
+        ctx.fillRect(-j.w / 2, -j.h, j.w, j.h);
+        ctx.restore();
+        return;
+      }
+      if (j.golpeado > 0 && Math.floor(j.golpeado / 6) % 2 === 0) return;   // parpadea
+
+      // Se aplasta un poquito cuando está en el piso
+      let aplaste = j.enSuelo ? Math.sin(cuadro * 0.2) * 3 : 0;
+      let x = j.x, y = j.y + aplaste, w = j.w, h = j.h - aplaste;
+
+      ctx.fillStyle = "#0d0d0d";
+      rectRedondo(x, y, w, h, 10);
+      ctx.fill();
+      // Corona
+      ctx.fillStyle = "#ffd700";
+      ctx.beginPath();
+      ctx.moveTo(x + 20, y);
+      ctx.lineTo(x + 25, y - 28);
+      ctx.lineTo(x + 42, y - 12);
+      ctx.lineTo(x + 55, y - 34);
+      ctx.lineTo(x + 68, y - 12);
+      ctx.lineTo(x + 85, y - 28);
+      ctx.lineTo(x + 90, y);
+      ctx.closePath();
+      ctx.fill();
+      // Ojos rojos que te miran
+      ojos(x + 32, x + 78, y + 42, 13, bola.x, bola.y, "#d50000");
+      // Cejas
+      ctx.strokeStyle = "#ff5252";
+      ctx.lineWidth = 5;
+      ctx.beginPath();
+      ctx.moveTo(x + 14, y + 20);  ctx.lineTo(x + 46, y + 32);
+      ctx.moveTo(x + 96, y + 20);  ctx.lineTo(x + 64, y + 32);
+      ctx.stroke();
+      // Boca con dientes
+      ctx.fillStyle = "white";
+      ctx.beginPath();
+      ctx.moveTo(x + 28, y + 75);
+      for (let i = 0; i <= 6; i++) ctx.lineTo(x + 28 + i * 9, y + (i % 2 === 0 ? 75 : 88));
+      ctx.closePath();
+      ctx.fill();
+    }
+
+    // Cara de la bolita (feliz o molesta)
+    function dibujarCara(estaMolesta) {
+      let m = bola.mira;
+      ctx.save();
+      ctx.translate(m * 3, 0);   // la cara mira hacia donde va
+      ctx.fillStyle = "white";
+      ctx.strokeStyle = "#5a0000";
+      ctx.lineWidth = 1;
+      for (let lado of [-1, 1]) {
+        ctx.beginPath();
+        ctx.arc(lado * 7, -5, 5.5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      }
+      ctx.fillStyle = "black";
+      ctx.strokeStyle = "black";
+      if (estaMolesta) {
+        ctx.beginPath();
+        ctx.arc(-7, -3, 2.7, 0, Math.PI * 2);
+        ctx.arc(7, -3, 2.7, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        ctx.moveTo(-14, -14); ctx.lineTo(-3, -9);
+        ctx.moveTo(14, -14);  ctx.lineTo(3, -9);
+        ctx.stroke();
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(-7, 11); ctx.lineTo(-3.5, 8); ctx.lineTo(0, 11); ctx.lineTo(3.5, 8); ctx.lineTo(7, 11);
+        ctx.stroke();
+      } else {
+        ctx.beginPath();
+        ctx.arc(-7 + m * 2, -5, 2.7, 0, Math.PI * 2);
+        ctx.arc(7 + m * 2, -5, 2.7, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = "rgba(255, 150, 170, 0.6)";
+        ctx.beginPath();
+        ctx.arc(-13, 5, 3.5, 0, Math.PI * 2);
+        ctx.arc(13, 5, 3.5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(0, 3, 8, 0.15 * Math.PI, 0.85 * Math.PI);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    function dibujarBola() {
+      if (muriendo > 0 && Math.floor(muriendo / 5) % 2 === 0) return;
+      if (invencible > 0 && Math.floor(invencible / 5) % 2 === 0) return;
+
+      ctx.save();
+      ctx.translate(bola.x, bola.y);
+
+      // Cuerpo rojo con brillo
+      let degradado = ctx.createRadialGradient(-7, -8, 2, 0, 0, bola.r);
+      degradado.addColorStop(0, "#ff8a80");
+      degradado.addColorStop(0.5, "#e53935");
+      degradado.addColorStop(1, "#b71c1c");
+      ctx.fillStyle = degradado;
+      ctx.beginPath();
+      ctx.arc(0, 0, bola.r, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Manchitas que giran (para que se note que rueda)
+      ctx.save();
+      ctx.rotate(bola.angulo);
+      ctx.fillStyle = "rgba(120, 0, 0, 0.35)";
+      ctx.beginPath();
+      ctx.arc(0, -16, 3, 0, Math.PI * 2);
+      ctx.arc(0, 16, 3, 0, Math.PI * 2);
+      ctx.arc(-16, 0, 2.5, 0, Math.PI * 2);
+      ctx.arc(16, 0, 2.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+
+      // Brillo
+      ctx.fillStyle = "rgba(255, 255, 255, 0.45)";
+      ctx.beginPath();
+      ctx.ellipse(-8, -12, 6, 3.5, -0.5, 0, Math.PI * 2);
+      ctx.fill();
+
+      dibujarCara(molesto > 0 || muriendo > 0);
+      ctx.restore();
+    }
+
+    // 14. TEXTOS Y PANTALLAS
+    function texto(t, x, y) {
+      ctx.lineWidth = 4;
+      ctx.lineJoin = "round";
+      ctx.strokeStyle = "rgba(0, 0, 0, 0.75)";
+      ctx.strokeText(t, x, y);
+      ctx.fillStyle = "white";
+      ctx.fillText(t, x, y);
+    }
+
+    function dibujarMensaje(titulo, lineas) {
+      let medioX = canvas.width / 2;
+      let medioY = canvas.height / 2;
+      ctx.fillStyle = "rgba(0, 0, 0, 0.7)";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = "white";
+      ctx.textAlign = "center";
+      ctx.font = "bold 48px Arial";
+      ctx.fillText(titulo, medioX, medioY - 40);
+      ctx.font = "24px Arial";
+      for (let i = 0; i < lineas.length; i++) {
+        ctx.fillText(lineas[i], medioX, medioY + 10 + i * 36);
+      }
+      ctx.textAlign = "left";
+    }
+
+    function dibujarHUD() {
+      ctx.font = "22px Arial";
+      ctx.textAlign = "left";
+      texto("Nivel " + (numNivel + 1) + " / " + NIVELES.length + "  ·  " + NIVELES[numNivel].nombre, 20, 36);
+      ctx.textAlign = "center";
+      texto("⭐ " + estrellasTomadas + " / " + nivel.estrellas.length, canvas.width / 2, 36);
+      ctx.textAlign = "right";
+      texto("❤️ x " + vidas, canvas.width - 20, 36);
+      ctx.textAlign = "left";
+
+      // Barra de vida del jefe
+      let j = nivel.jefe;
+      if (j && j.vida > 0) {
+        let ancho = 300, x = canvas.width / 2 - ancho / 2, y = 56;
+        ctx.fillStyle = "rgba(0, 0, 0, 0.6)";
+        ctx.fillRect(x - 4, y - 4, ancho + 8, 26);
+        for (let i = 0; i < 3; i++) {
+          ctx.fillStyle = i < j.vida ? "#e53935" : "#444";
+          ctx.fillRect(x + i * (ancho / 3) + 2, y, ancho / 3 - 4, 18);
+        }
+        ctx.font = "bold 16px Arial";
+        ctx.textAlign = "center";
+        texto("JEFE CUADRADO", canvas.width / 2, y + 40);
+        ctx.textAlign = "left";
+      }
+    }
+
+    function dibujarMenu() {
+      let medioX = canvas.width / 2;
+      let medioY = canvas.height / 2;
+      ctx.fillStyle = "rgba(0, 0, 0, 0.75)";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.textAlign = "center";
+      ctx.fillStyle = "white";
+      ctx.font = "bold 48px Arial";
+      ctx.fillText("⏸ MENÚ", medioX, medioY - 120);
+      ctx.font = "28px Arial";
+      for (let i = 0; i < OPCIONES_MENU.length; i++) {
+        let y = medioY - 30 + i * 60;
+        if (i === opcionMenu) {
+          ctx.fillStyle = "rgba(255, 215, 0, 0.2)";
+          ctx.strokeStyle = "gold";
+          ctx.lineWidth = 2;
+          rectRedondo(medioX - 200, y - 36, 400, 50, 12);
+          ctx.fill();
+          ctx.stroke();
+          ctx.fillStyle = "gold";
+        } else {
+          ctx.fillStyle = "white";
+        }
+        ctx.fillText(OPCIONES_MENU[i], medioX, y);
+      }
+      ctx.fillStyle = "#bbb";
+      ctx.font = "18px Arial";
+      ctx.fillText("↑ ↓ para moverte   ·   Enter para elegir   ·   Backspace para volver al juego", medioX, medioY + 170);
+      ctx.textAlign = "left";
+    }
+
+    function dibujarNivelCompleto() {
+      let medioX = canvas.width / 2;
+      let medioY = canvas.height / 2;
+      let ultimo = numNivel === NIVELES.length - 1;
+      dibujarMensaje(ultimo ? "¡Derrotaste al jefe!" : "¡Nivel completado!", ["", "", "Presiona Enter para " + (ultimo ? "ver el final" : "seguir")]);
+      // Estrellas conseguidas
+      let total = nivel.estrellas.length;
+      for (let i = 0; i < total; i++) {
+        let x = medioX + (i - (total - 1) / 2) * 80;
+        let conseguida = i < estrellasTomadas;
+        dibujarEstrella(x, medioY + 30, 30, 0, conseguida ? "#ffd700" : "#555", conseguida ? "#b8860b" : "#333");
+      }
+    }
+
+    // 15. DIBUJAR TODO
+    function dibujar() {
+      let tema = TEMAS[NIVELES[numNivel].tema];
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      dibujarFondo(tema);
+
+      // El mundo: se agranda con "escala" y se corre según la cámara
+      let sacudida = temblor > 0 ? (Math.random() - 0.5) * temblor : 0;
+      ctx.setTransform(escala, 0, 0, escala, -camX * escala + sacudida, sacudida);
+
+      dibujarSolidos(tema);
+      dibujarPinchos();
+      dibujarBanderas();
+      dibujarMoviles();
+      dibujarCajas();
+      dibujarEstrellas();
+      dibujarEnemigos();
+      dibujarJefe();
+      dibujarAplastadores();
+      if (estado !== "inicio") dibujarBola();
+
+      // Los textos van encima, sin escala
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      if (estado !== "inicio") dibujarHUD();
+
+      if (estado === "inicio") {
+        dibujarMensaje("🔴 La Bolita Roja", [
+          "¡Los cuadrados malvados quieren volver cuadrado el mundo!",
+          "← → para rodar   ·   ↑ o Espacio para saltar",
+          "Salta encima de los cuadrados negros para aplastarlos.",
+          "Junta las estrellas ⭐ y llega a la bandera de meta.",
+          "Backspace ⌫ abre el menú de pausa",
+          "Presiona Enter para empezar"
+        ]);
+        // La bolita grande en la pantalla de inicio
+        ctx.save();
+        ctx.translate(canvas.width / 2, canvas.height / 2 - 150);
+        ctx.scale(2.2, 2.2);
+        ctx.translate(-bola.x, -bola.y);
+        bola.mira = 1;
+        dibujarBola();
+        ctx.restore();
+      } else if (estado === "aviso") {
+        dibujarMensaje("Nivel " + (numNivel + 1), [NIVELES[numNivel].nombre]);
+      } else if (estado === "menu") {
+        dibujarMenu();
+      } else if (estado === "nivelCompleto") {
+        dibujarNivelCompleto();
+      } else if (estado === "perdido") {
+        dibujarMensaje("¡Te quedaste sin vidas!", [
+          "Llegaste al nivel " + (numNivel + 1),
+          "Presiona Enter para intentar este nivel otra vez"
+        ]);
+      } else if (estado === "ganado") {
+        let posibles = 0;
+        for (let n = 0; n < NIVELES.length; n++) posibles += 3;
+        dibujarMensaje("🏆 ¡SALVASTE EL MUNDO! 🏆", [
+          "Los cuadrados malvados fueron derrotados.",
+          "Estrellas: ⭐ " + totalEstrellas() + " / " + posibles,
+          "Presiona Enter para volver al inicio"
+        ]);
+      }
+    }
+
+    // 16. EL BUCLE DEL JUEGO
+    // Siempre avanza 60 veces por segundo, aunque la pantalla sea más rápida o más lenta
+    function paso() {
+      cuadro++;
+      if (estado === "jugando") {
+        actualizar();
+      } else if (estado === "aviso") {
+        avisoCuadros--;
+        if (avisoCuadros <= 0) estado = "jugando";
+      }
+    }
+
+    let tiempoAnterior = performance.now();
+    let acumulado = 0;
+    function bucle(ahora) {
+      acumulado += Math.min(100, ahora - tiempoAnterior);
+      tiempoAnterior = ahora;
+      while (acumulado >= 1000 / 60) {
+        paso();
+        acumulado -= 1000 / 60;
+      }
+      dibujar();
+      requestAnimationFrame(bucle);
+    }
+
+    // 17. ¡EMPEZAR!
+    ajustarPantalla();
+    cargarNivel(0);
+    estado = "inicio";
+    requestAnimationFrame(bucle);
+  </script>
+</body>
+</html>

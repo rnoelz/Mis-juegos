@@ -1,0 +1,1191 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Comecocos</title>
+  <!-- Letra de maquinita (arcade) -->
+  <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      background: #000;
+    }
+    canvas {
+      display: block;
+      position: fixed;
+      top: 0;
+      left: 0;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="juego"></canvas>
+
+  <script>
+    // =====================================================================
+    //  COMECOCOS  -  inspirado en el Pac-Man original de la maquinita (1980)
+    //  Mismas reglas: 4 fantasmas con su propia personalidad, 240 puntitos,
+    //  4 pastillas de poder, frutas, velocidades y tiempos de cada nivel.
+    // =====================================================================
+
+    // 1. LA PANTALLA (se dibuja por dentro a 1800p para que se vea nítido)
+    const canvas = document.getElementById("juego");
+    const ctx = canvas.getContext("2d");
+    const ALTO_RESOLUCION = 1800;
+    const ANCHO_JUEGO = 224, ALTO_JUEGO = 288;   // 28 x 36 cuadros de 8 pixeles, como la maquinita
+    let RES = 1, PW = 0, PH = 0, ESC = 1, OX = 0, OY = 0;
+
+    function ajustarPantalla() {
+      PW = window.innerWidth;
+      PH = window.innerHeight;
+      RES = Math.max(ALTO_RESOLUCION / PH, window.devicePixelRatio || 1);
+      canvas.width = Math.round(PW * RES);
+      canvas.height = Math.round(PH * RES);
+      canvas.style.width = PW + "px";
+      canvas.style.height = PH + "px";
+      ESC = Math.min(PW / ANCHO_JUEGO, PH / ALTO_JUEGO);
+      OX = (PW - ANCHO_JUEGO * ESC) / 2;
+      OY = (PH - ALTO_JUEGO * ESC) / 2;
+      prepararLaberinto();
+    }
+    window.addEventListener("resize", ajustarPantalla);
+
+    // 2. EL LABERINTO (28 x 31 cuadros)
+    //   #  pared      .  puntito (10)      o  pastilla de poder (50)
+    //   -  puerta de la casa de los fantasmas
+    //   G  adentro de la casa de los fantasmas
+    //   (espacio) camino sin puntito
+    const MAPA = [
+      "############################",
+      "#............##............#",
+      "#.####.#####.##.#####.####.#",
+      "#o####.#####.##.#####.####o#",
+      "#.####.#####.##.#####.####.#",
+      "#..........................#",
+      "#.####.##.########.##.####.#",
+      "#.####.##.########.##.####.#",
+      "#......##....##....##......#",
+      "######.##### ## #####.######",
+      "######.##### ## #####.######",
+      "######.##          ##.######",
+      "######.## ###--### ##.######",
+      "######.## #GGGGGG# ##.######",
+      "      .   #GGGGGG#   .      ",
+      "######.## #GGGGGG# ##.######",
+      "######.## ######## ##.######",
+      "######.##          ##.######",
+      "######.## ######## ##.######",
+      "######.## ######## ##.######",
+      "#............##............#",
+      "#.####.#####.##.#####.####.#",
+      "#.####.#####.##.#####.####.#",
+      "#o..##.......  .......##..o#",
+      "###.##.##.########.##.##.###",
+      "###.##.##.########.##.##.###",
+      "#......##....##....##......#",
+      "#.##########.##.##########.#",
+      "#.##########.##.##########.#",
+      "#..........................#",
+      "############################"
+    ];
+    const COLS = 28, FILAS = 31, T = 8;
+    const ARRIBA = 24;   // el laberinto empieza 3 filas abajo (arriba va el puntaje)
+    const DX = [0, -1, 0, 1], DY = [-1, 0, 1, 0];   // 0 arriba, 1 izquierda, 2 abajo, 3 derecha
+    function opuesto(d) { return (d + 2) % 4; }
+
+    let mapa = [];   // copia del laberinto con los puntitos que quedan
+    function celda(x, y) {
+      if (y === 14 && (x < 0 || x >= COLS)) return " ";   // el túnel de los lados
+      if (x < 0 || x >= COLS || y < 0 || y >= FILAS) return "#";
+      return mapa[y][x];
+    }
+    function libre(x, y) {
+      let c = celda(x, y);
+      return c !== "#" && c !== "-" && c !== "G";
+    }
+
+    // 3. LOS PERSONAJES QUE PUEDES ELEGIR (todos juegan igual, solo cambia cómo se ven)
+    const PERSONAJES = [
+      { nombre: "COMECOCOS",    color: "#ffff00", extra: "",         texto: "El clásico de siempre" },
+      { nombre: "SEÑORA COCOS", color: "#ffff00", extra: "moño",     texto: "Con moño y pintalabios" },
+      { nombre: "EL FLACO",     color: "#2f8fff", extra: "gorra",    texto: "Con su gorra azul" },
+      { nombre: "WILLITO",      color: "#ffb300", extra: "taxi",     texto: "El taxista del barrio" },
+      { nombre: "EL CHEVEZ",    color: "#ff4b3a", extra: "bigote",   texto: "Bigote de papá" },
+      { nombre: "YONI",         color: "#4caf50", extra: "lentes",   texto: "Lentes de busero" },
+      { nombre: "ROBOCOCO",     color: "#b0bec5", extra: "robot",    texto: "Mitad robot, todo hambre" },
+      { nombre: "CALABAZA",     color: "#ff8f00", extra: "calabaza", texto: "Sale en noche de brujas" }
+    ];
+
+    // Los 4 fantasmas: cada uno persigue de forma distinta
+    const FANTASMAS = [
+      { nombre: "rojo",    color: "#ff0000", caracter: "SOMBRA", apodo: "ROJITO",  esquina: { x: 25, y: -4 }, casaX: 112 },
+      { nombre: "rosa",    color: "#ffb8ff", caracter: "VELOZ",  apodo: "ROSITA",  esquina: { x: 2,  y: -4 }, casaX: 112 },
+      { nombre: "celeste", color: "#00ffff", caracter: "TÍMIDO", apodo: "CELESTE", esquina: { x: 27, y: 32 }, casaX: 96 },
+      { nombre: "naranja", color: "#ffb852", caracter: "LENTO",  apodo: "NARANJO", esquina: { x: 0,  y: 32 }, casaX: 128 }
+    ];
+
+    // 4. LAS REGLAS DE CADA NIVEL (iguales a la maquinita)
+    const VEL_BASE = 75.75757625 / 60;   // pixeles por cuadro al 100% de velocidad
+    function velocidades(n) {
+      // [comecocos, comecocos con pastilla, fantasmas, fantasmas asustados, fantasmas en el túnel]
+      if (n === 1) return [0.80, 0.90, 0.75, 0.50, 0.40];
+      if (n <= 4) return [0.90, 0.95, 0.85, 0.55, 0.45];
+      if (n <= 20) return [1.00, 1.00, 0.95, 0.60, 0.50];
+      return [0.90, 0.90, 0.95, 0.95, 0.50];
+    }
+    // Segundos que duran los fantasmas asustados, y cuántas veces parpadean antes de volver
+    const SUSTO =     [6, 5, 4, 3, 2, 5, 2, 2, 1, 5, 2, 1, 1, 3, 1, 1, 0, 1];
+    const DESTELLOS = [5, 5, 5, 5, 5, 5, 5, 5, 3, 5, 5, 3, 3, 5, 3, 3, 0, 3];
+    // Dispersión (cada uno a su esquina) y persecución, en segundos, alternando
+    function fasesDe(n) {
+      if (n === 1) return [7, 20, 7, 20, 5, 20, 5, Infinity];
+      if (n <= 4) return [7, 20, 7, 20, 5, 1033, 1 / 60, Infinity];
+      return [5, 20, 5, 20, 5, 1037, 1 / 60, Infinity];
+    }
+    const FRUTAS = [["cereza", 100], ["fresa", 300], ["naranja", 500], ["naranja", 500], ["manzana", 700], ["manzana", 700],
+                    ["melon", 1000], ["melon", 1000], ["nave", 2000], ["nave", 2000], ["campana", 3000], ["campana", 3000], ["llave", 5000]];
+    function frutaDe(n) { return FRUTAS[Math.min(n, 13) - 1]; }
+    // Cuando quedan pocos puntitos, el fantasma rojo se enoja y acelera ("Elroy")
+    function enojoDe(n) {
+      return n === 1 ? 20 : n === 2 ? 30 : n <= 5 ? 40 : n <= 8 ? 50 : n <= 11 ? 60 : n <= 14 ? 80 : n <= 18 ? 100 : 120;
+    }
+    const NIVELES_INTERMEDIO = [2, 5, 9, 13, 17];   // después de estos niveles sale una escenita
+
+    // 5. VARIABLES DEL JUEGO
+    let estado = "titulo";   // titulo, elegir, listo, jugando, muerte, nivelCompleto, intermedio, gameover
+    let tiempo = 0;          // cuadros desde que empezó el estado actual
+    let cuadro = 0;
+    let pausado = false;
+    let duracionListo = 120;
+    let nivel = 1, puntos = 0, vidas = 3, vidaExtraDada = false;
+    let record = 0;
+    let personaje = 0;
+    let pac = null;
+    let fantasmas = [];
+    let puntosComidos = 0, puntosTotales = 0;
+    let fase = 0, tiempoFase = 0;
+    let susto = 0, comidosEnSusto = 0;
+    let congelado = 0, fantasmaComido = null;
+    let fruta = null;
+    let flotantes = [];          // numeritos de puntos que aparecen
+    let historialFrutas = [];
+    let contadorGlobal = null;   // se usa después de perder una vida
+    let tiempoSinComer = 0;
+    let enojoSuspendido = false;
+
+    try {
+      record = parseInt(localStorage.getItem("comecocosRecord")) || 0;
+      personaje = parseInt(localStorage.getItem("comecocosPersonaje")) || 0;
+    } catch (e) {}
+    function guardarRecord() {
+      try {
+        localStorage.setItem("comecocosRecord", record);
+        localStorage.setItem("comecocosPersonaje", personaje);
+      } catch (e) {}
+    }
+
+    function sumar(n) {
+      puntos += n;
+      if (!vidaExtraDada && puntos >= 10000) {
+        vidaExtraDada = true;
+        vidas++;
+        sonidoVida();
+      }
+      if (puntos > record) record = puntos;
+    }
+
+    // 6. EMPEZAR PARTIDA, NIVEL Y VIDA
+    function empezarJuego() {
+      puntos = 0;
+      vidas = 3;
+      nivel = 1;
+      vidaExtraDada = false;
+      historialFrutas = [];
+      guardarRecord();
+      nuevoNivel();
+      empezarListo(250);
+      musicaInicio();
+    }
+
+    function nuevoNivel() {
+      mapa = MAPA.map(fila => fila.split(""));
+      puntosTotales = 0;
+      for (let fila of mapa) for (let c of fila) if (c === "." || c === "o") puntosTotales++;
+      puntosComidos = 0;
+      contadorGlobal = null;
+      enojoSuspendido = false;
+      fantasmas = FANTASMAS.map(f => Object.assign({}, f, { contador: 0 }));
+      historialFrutas.push(frutaDe(nivel)[0]);
+      reiniciarPosiciones();
+    }
+
+    function reiniciarPosiciones() {
+      pac = { x: 112, y: 188, dir: 1, quiero: 1, parado: false, boca: 0, pausa: 0 };
+      for (let g of fantasmas) {
+        g.asustado = false;
+        g.parado = false;
+        g.enojo = 0;
+        if (g.nombre === "rojo") { g.x = 112; g.y = 92; g.dir = 1; g.estado = "normal"; }
+        else { g.x = g.casaX; g.y = 116; g.dir = g.nombre === "rosa" ? 2 : 0; g.estado = "casa"; }
+      }
+      fase = 0;
+      tiempoFase = 0;
+      susto = 0;
+      congelado = 0;
+      fruta = null;
+      flotantes = [];
+      tiempoSinComer = 0;
+    }
+
+    function empezarListo(duracion) {
+      estado = "listo";
+      tiempo = 0;
+      duracionListo = duracion;
+    }
+
+    // 7. MOVER POR EL LABERINTO
+    // Todos caminan por el centro de los pasillos. Al pasar por el centro de un
+    // cuadro se decide hacia dónde seguir.
+    function mover(a, distancia, decidir) {
+      let vueltas = 0;
+      while (distancia > 1e-9 && vueltas++ < 10) {
+        let dx = DX[a.dir], dy = DY[a.dir];
+        let tx = Math.floor(a.x / T), ty = Math.floor(a.y / T);
+        let falta = dx ? (tx * T + 4 - a.x) * dx : (ty * T + 4 - a.y) * dy;
+        if (falta < -1e-6) falta += T;
+        if (Math.abs(falta) <= 1e-6) {
+          a.x = tx * T + 4;
+          a.y = ty * T + 4;
+          decidir(a);
+          if (a.parado) return;
+          dx = DX[a.dir]; dy = DY[a.dir];
+          falta = T;
+        }
+        let paso = Math.min(distancia, falta);
+        a.x += dx * paso;
+        a.y += dy * paso;
+        distancia -= paso;
+        // El túnel: sale por un lado y entra por el otro
+        if (a.x < -12) a.x += 240;
+        else if (a.x > 236) a.x -= 240;
+      }
+    }
+
+    // 8. EL COMECOCOS
+    function decidirPac(a) {
+      let tx = Math.floor(a.x / T), ty = Math.floor(a.y / T);
+      let q = a.quiero;
+      if (q !== null && libre(tx + DX[q], ty + DY[q])) a.dir = q;
+      else if (!libre(tx + DX[a.dir], ty + DY[a.dir])) a.parado = true;
+    }
+
+    function actualizarPac() {
+      if (pac.pausa > 0) { pac.pausa--; return; }   // se detiene un instante al comer
+      let vel = velocidades(nivel);
+      let v = VEL_BASE * (susto > 0 ? vel[1] : vel[0]);
+      let q = pac.quiero;
+      // Darse la vuelta se puede en cualquier momento
+      if (q === opuesto(pac.dir)) { pac.dir = q; pac.parado = false; }
+      if (pac.parado) {
+        let tx = Math.floor(pac.x / T), ty = Math.floor(pac.y / T);
+        if (q !== null && libre(tx + DX[q], ty + DY[q])) { pac.dir = q; pac.parado = false; }
+        else return;
+      }
+      // Doblar un poquito antes de la esquina (como en la maquinita)
+      if (q !== null && q !== pac.dir) {
+        let tx = Math.floor(pac.x / T), ty = Math.floor(pac.y / T);
+        let falta = DX[pac.dir] ? (tx * T + 4 - pac.x) * DX[pac.dir] : (ty * T + 4 - pac.y) * DY[pac.dir];
+        if (falta >= 0 && falta <= 3 && libre(tx + DX[q], ty + DY[q])) {
+          pac.x = tx * T + 4;
+          pac.y = ty * T + 4;
+          pac.dir = q;
+        }
+      }
+      mover(pac, v, decidirPac);
+      pac.boca += v;
+      comer();
+    }
+
+    function comer() {
+      let tx = Math.floor(pac.x / T), ty = Math.floor(pac.y / T);
+      let c = celda(tx, ty);
+      if (c !== "." && c !== "o") return;
+      mapa[ty][tx] = " ";
+      puntosComidos++;
+      tiempoSinComer = 0;
+      if (c === ".") {
+        sumar(10);
+        pac.pausa = 1;
+      } else {
+        sumar(50);
+        pac.pausa = 3;
+        asustarFantasmas();
+      }
+      sonidoWaka();
+      contarParaLaCasa();
+      if (puntosComidos === 70 || puntosComidos === 170) {
+        let f = frutaDe(nivel);
+        fruta = { tipo: f[0], puntos: f[1], t: 570 + Math.floor(Math.random() * 60) };
+      }
+      if (puntosComidos === puntosTotales) {
+        estado = "nivelCompleto";
+        tiempo = 0;
+      }
+    }
+
+    function asustarFantasmas() {
+      let segundos = SUSTO[nivel - 1] || 0;
+      for (let g of fantasmas) {
+        if (g.estado === "ojos" || g.estado === "entrando") continue;
+        if (g.estado === "normal") g.dir = opuesto(g.dir);
+        if (segundos > 0) g.asustado = true;
+      }
+      susto = segundos * 60;
+      comidosEnSusto = 0;
+    }
+
+    // 9. LOS FANTASMAS
+    function faseActual() {
+      return fase % 2 === 0 ? "dispersion" : "persecucion";
+    }
+
+    // A qué cuadro quiere llegar cada fantasma
+    function objetivo(g) {
+      if (g.estado === "ojos") return { x: 13, y: 11 };
+      let px = Math.floor(pac.x / T), py = Math.floor(pac.y / T);
+      let enojado = g.nombre === "rojo" && g.enojo > 0;
+      if (faseActual() === "dispersion" && !enojado) return g.esquina;
+      switch (g.nombre) {
+        case "rojo":      // Te persigue directo
+          return { x: px, y: py };
+        case "rosa": {    // Te embosca: apunta 4 cuadros delante de ti
+          let ox = DX[pac.dir] * 4, oy = DY[pac.dir] * 4;
+          if (pac.dir === 0) ox = -4;   // el mismo error de la maquinita al ir hacia arriba
+          return { x: px + ox, y: py + oy };
+        }
+        case "celeste": { // Usa al rojo: dobla la línea del rojo a 2 cuadros delante de ti
+          let ax = px + DX[pac.dir] * 2, ay = py + DY[pac.dir] * 2;
+          if (pac.dir === 0) ax -= 2;
+          let r = fantasmas[0];
+          let rx = Math.floor(r.x / T), ry = Math.floor(r.y / T);
+          return { x: 2 * ax - rx, y: 2 * ay - ry };
+        }
+        case "naranja": { // Te persigue de lejos, pero si se acerca mucho se va a su esquina
+          let tx = Math.floor(g.x / T), ty = Math.floor(g.y / T);
+          let d2 = (tx - px) * (tx - px) + (ty - py) * (ty - py);
+          return d2 > 64 ? { x: px, y: py } : g.esquina;
+        }
+      }
+    }
+
+    function decidirFantasma(g) {
+      let tx = Math.floor(g.x / T), ty = Math.floor(g.y / T);
+      // Los ojos llegaron a la puerta: entran a la casa para revivir
+      if (g.estado === "ojos" && ty === 11 && (tx === 13 || tx === 14)) {
+        g.x = 112;
+        g.y = 92;
+        g.estado = "entrando";
+        g.parado = true;
+        return;
+      }
+      let opciones = [];
+      for (let d = 0; d < 4; d++) {
+        if (d === opuesto(g.dir)) continue;   // nunca se dan la vuelta solos
+        if (!libre(tx + DX[d], ty + DY[d])) continue;
+        // En estos 4 cuadros no pueden subir (igual que en la maquinita)
+        if (d === 0 && g.estado === "normal" && !g.asustado && (ty === 11 || ty === 23) && (tx === 12 || tx === 15)) continue;
+        opciones.push(d);
+      }
+      if (opciones.length === 0) { g.dir = opuesto(g.dir); return; }
+      if (g.asustado && g.estado === "normal") {
+        g.dir = opciones[Math.floor(Math.random() * opciones.length)];
+        return;
+      }
+      // Escoge el camino que lo deja más cerca de su objetivo (empate: arriba, izquierda, abajo, derecha)
+      let obj = objetivo(g), mejor = opciones[0], mejorDist = Infinity;
+      for (let d of opciones) {
+        let nx = tx + DX[d], ny = ty + DY[d];
+        let dist = (nx - obj.x) * (nx - obj.x) + (ny - obj.y) * (ny - obj.y);
+        if (dist < mejorDist) { mejorDist = dist; mejor = d; }
+      }
+      g.dir = mejor;
+    }
+
+    function velocidadFantasma(g) {
+      let vel = velocidades(nivel);
+      if (g.estado === "ojos") return 2.0;
+      if (g.estado === "entrando") return 1.6;
+      if (g.estado === "casa" || g.estado === "saliendo") return VEL_BASE * 0.5;
+      let tx = Math.floor(g.x / T), ty = Math.floor(g.y / T);
+      if (ty === 14 && (tx <= 5 || tx >= 22)) return VEL_BASE * vel[4];
+      if (g.asustado) return VEL_BASE * vel[3];
+      if (g.nombre === "rojo" && g.enojo > 0) return VEL_BASE * (vel[2] + 0.05 * g.enojo);
+      return VEL_BASE * vel[2];
+    }
+
+    function actualizarFantasma(g) {
+      let v = velocidadFantasma(g);
+      switch (g.estado) {
+        case "casa":      // sube y baja esperando su turno
+          g.y += (g.dir === 2 ? 1 : -1) * v;
+          if (g.y >= 119) g.dir = 0;
+          if (g.y <= 113) g.dir = 2;
+          break;
+        case "saliendo":  // primero al centro de la casa, luego para arriba por la puerta
+          if (Math.abs(g.x - 112) > 0.01) {
+            g.dir = g.x < 112 ? 3 : 1;
+            g.x += Math.sign(112 - g.x) * Math.min(v, Math.abs(112 - g.x));
+          } else if (g.y > 92) {
+            g.dir = 0;
+            g.y = Math.max(92, g.y - v);
+          } else {
+            g.estado = "normal";
+            g.dir = 1;
+            g.parado = false;
+          }
+          break;
+        case "entrando":  // los ojos bajan a la casa y el fantasma revive
+          if (g.y < 116) {
+            g.dir = 2;
+            g.y = Math.min(116, g.y + v);
+          } else if (Math.abs(g.x - g.casaX) > 0.01) {
+            g.dir = g.x < g.casaX ? 3 : 1;
+            g.x += Math.sign(g.casaX - g.x) * Math.min(v, Math.abs(g.casaX - g.x));
+          } else {
+            g.asustado = false;
+            g.estado = "saliendo";
+          }
+          break;
+        default:
+          mover(g, v, decidirFantasma);
+      }
+    }
+
+    // ¿Quién sale de la casa? (por puntitos comidos, o si no comes nada por un rato)
+    function siguienteEnCasa() {
+      for (let i = 1; i < 4; i++) if (fantasmas[i].estado === "casa") return fantasmas[i];
+      return null;
+    }
+    function limiteDe(g) {
+      if (g.nombre === "rosa") return 0;
+      if (g.nombre === "celeste") return nivel === 1 ? 30 : 0;
+      return nivel === 1 ? 60 : nivel === 2 ? 50 : 0;
+    }
+    function liberar(g) {
+      if (g && g.estado === "casa") g.estado = "saliendo";
+    }
+    function contarParaLaCasa() {
+      if (contadorGlobal !== null) {
+        contadorGlobal++;
+        if (contadorGlobal === 7) liberar(fantasmas[1]);
+        else if (contadorGlobal === 17) liberar(fantasmas[2]);
+        else if (contadorGlobal === 32) { contadorGlobal = null; liberar(fantasmas[3]); }
+      } else {
+        let g = siguienteEnCasa();
+        if (g) g.contador++;
+      }
+    }
+    function revisarSalidas() {
+      if (contadorGlobal === null) {
+        let g = siguienteEnCasa();
+        if (g && g.contador >= limiteDe(g)) liberar(g);
+      }
+      tiempoSinComer++;
+      if (tiempoSinComer >= (nivel < 5 ? 240 : 180)) {
+        tiempoSinComer = 0;
+        liberar(siguienteEnCasa());
+      }
+    }
+
+    function actualizarEnojo() {
+      if (enojoSuspendido && fantasmas[3].estado !== "casa") enojoSuspendido = false;
+      let quedan = puntosTotales - puntosComidos, limite = enojoDe(nivel);
+      fantasmas[0].enojo = enojoSuspendido ? 0 : quedan <= limite / 2 ? 2 : quedan <= limite ? 1 : 0;
+    }
+
+    function actualizarFases() {
+      if (susto > 0) return;   // el reloj se detiene mientras están asustados
+      tiempoFase++;
+      let fases = fasesDe(nivel);
+      if (fase < fases.length - 1 && tiempoFase >= fases[fase] * 60) {
+        fase++;
+        tiempoFase = 0;
+        // Al cambiar de fase todos se dan la vuelta
+        for (let g of fantasmas) if (g.estado === "normal") g.dir = opuesto(g.dir);
+      }
+    }
+
+    function revisarChoques() {
+      let px = Math.floor(pac.x / T), py = Math.floor(pac.y / T);
+      for (let g of fantasmas) {
+        if (g.estado !== "normal") continue;
+        if (Math.floor(g.x / T) !== px || Math.floor(g.y / T) !== py) continue;
+        if (g.asustado) {
+          comidosEnSusto++;
+          let valor = 200 * Math.pow(2, comidosEnSusto - 1);
+          sumar(valor);
+          g.asustado = false;
+          g.estado = "ojos";
+          congelado = 60;
+          fantasmaComido = g;
+          flotantes.push({ x: g.x, y: g.y, texto: String(valor), color: "#00ffff", t: 60 });
+          sonidoComerFantasma();
+        } else {
+          estado = "muerte";
+          tiempo = 0;
+          return;
+        }
+      }
+    }
+
+    // 10. ACTUALIZAR TODO
+    function actualizarJuego() {
+      for (let f of flotantes) f.t--;
+      flotantes = flotantes.filter(f => f.t > 0);
+      if (congelado > 0) {
+        congelado--;
+        return;
+      }
+      actualizarFases();
+      if (susto > 0) {
+        susto--;
+        if (susto === 0) for (let g of fantasmas) g.asustado = false;
+      }
+      actualizarPac();
+      if (estado !== "jugando") return;
+      revisarChoques();
+      if (estado !== "jugando" || congelado) return;
+      revisarSalidas();
+      actualizarEnojo();
+      for (let g of fantasmas) actualizarFantasma(g);
+      revisarChoques();
+
+      if (fruta) {
+        fruta.t--;
+        if (Math.floor(pac.y / T) === 17 && Math.abs(pac.x - 112) < 6) {
+          sumar(fruta.puntos);
+          flotantes.push({ x: 112, y: 140, texto: String(fruta.puntos), color: "#ffb8ff", t: 120 });
+          sonidoFruta();
+          fruta = null;
+        } else if (fruta.t <= 0) {
+          fruta = null;
+        }
+      }
+    }
+
+    function actualizarMuerte() {
+      if (tiempo === 60) sonidoMuerte();
+      if (tiempo >= 200) {
+        vidas--;
+        if (vidas <= 0) {
+          estado = "gameover";
+          tiempo = 0;
+          guardarRecord();
+          return;
+        }
+        reiniciarPosiciones();
+        contadorGlobal = 0;
+        enojoSuspendido = true;
+        empezarListo(120);
+      }
+    }
+
+    function terminarNivel() {
+      let terminado = nivel;
+      nivel++;
+      if (NIVELES_INTERMEDIO.includes(terminado)) {
+        estado = "intermedio";
+        tiempo = 0;
+        musicaInicio();
+      } else {
+        nuevoNivel();
+        empezarListo(120);
+      }
+    }
+
+    function paso() {
+      cuadro++;
+      if (pausado) return;
+      tiempo++;
+      switch (estado) {
+        case "listo":
+          if (tiempo >= duracionListo) { estado = "jugando"; tiempo = 0; }
+          break;
+        case "jugando":
+          actualizarJuego();
+          break;
+        case "muerte":
+          actualizarMuerte();
+          break;
+        case "nivelCompleto":
+          if (tiempo >= 200) terminarNivel();
+          break;
+        case "intermedio":
+          if (tiempo >= 560) { nuevoNivel(); empezarListo(120); }
+          break;
+        case "gameover":
+          if (tiempo >= 200) { estado = "titulo"; tiempo = 0; }
+          break;
+      }
+      sonidoDeFondo();
+    }
+
+    // 11. SONIDOS (hechos con el navegador, sin archivos)
+    let audio = null, mudo = false, sirena = null, wakaLado = false;
+    function iniciarAudio() {
+      try {
+        if (!audio) audio = new (window.AudioContext || window.webkitAudioContext)();
+        if (audio.state === "suspended") audio.resume();
+      } catch (e) {}
+    }
+    function tono(f1, f2, dur, tipo, vol, espera) {
+      if (!audio || mudo) return;
+      let o = audio.createOscillator(), g = audio.createGain();
+      let t0 = audio.currentTime + (espera || 0);
+      o.type = tipo;
+      o.frequency.setValueAtTime(f1, t0);
+      o.frequency.linearRampToValueAtTime(f2, t0 + dur);
+      g.gain.setValueAtTime(vol, t0);
+      g.gain.linearRampToValueAtTime(0, t0 + dur);
+      o.connect(g).connect(audio.destination);
+      o.start(t0);
+      o.stop(t0 + dur + 0.02);
+    }
+    function sonidoWaka() {
+      wakaLado = !wakaLado;
+      if (wakaLado) tono(200, 470, 0.08, "triangle", 0.2);
+      else tono(470, 200, 0.08, "triangle", 0.2);
+    }
+    function sonidoComerFantasma() { tono(140, 1300, 0.45, "square", 0.05); }
+    function sonidoFruta() { tono(500, 1000, 0.08, "square", 0.05); tono(1000, 500, 0.08, "square", 0.05, 0.09); }
+    function sonidoVida() { for (let i = 0; i < 4; i++) tono(1050, 1050, 0.08, "square", 0.05, i * 0.13); }
+    function sonidoMuerte() {
+      for (let i = 0; i < 9; i++) tono(950 - i * 80, 380 - i * 30, 0.13, "square", 0.05, i * 0.14);
+      tono(120, 60, 0.12, "square", 0.06, 1.35);
+      tono(120, 60, 0.12, "square", 0.06, 1.55);
+    }
+    function musicaInicio() {
+      // Melodía propia (no es la de la maquinita)
+      let notas = [523, 659, 784, 1047, 988, 784, 659, 784, 880, 698, 587, 698, 784, 0, 1047, 0,
+                   523, 659, 784, 1047, 1175, 1047, 988, 784, 880, 988, 1047, 1175, 1319, 0, 1047, 0];
+      let bajo = [131, 196, 147, 196, 131, 196, 175, 196];
+      notas.forEach((f, i) => { if (f) tono(f, f, 0.12, "square", 0.035, i * 0.13); });
+      bajo.forEach((f, i) => tono(f, f, 0.45, "triangle", 0.12, i * 0.52));
+    }
+    // La sirena de fondo (sube de tono cuando quedan menos puntitos)
+    function sonidoDeFondo() {
+      let quiere = audio && !mudo && !pausado && estado === "jugando" && congelado === 0;
+      if (!quiere) {
+        if (sirena) { sirena.o.stop(); sirena = null; }
+        return;
+      }
+      if (!sirena) {
+        let o = audio.createOscillator(), g = audio.createGain();
+        g.gain.value = 0.025;
+        o.connect(g).connect(audio.destination);
+        o.start();
+        sirena = { o: o, g: g };
+      }
+      let f;
+      if (fantasmas.some(g => g.estado === "ojos" || g.estado === "entrando")) {
+        sirena.o.type = "square"; sirena.g.gain.value = 0.012;
+        f = 650 + (cuadro % 8) * 70;
+      } else if (susto > 0) {
+        sirena.o.type = "square"; sirena.g.gain.value = 0.012;
+        f = 170 + (cuadro % 16) * 14;
+      } else {
+        sirena.o.type = "sine"; sirena.g.gain.value = 0.03;
+        let c = (cuadro % 30) / 30, tri = c < 0.5 ? c * 2 : 2 - c * 2;
+        f = 330 + (puntosComidos / puntosTotales) * 260 + tri * 160;
+      }
+      sirena.o.frequency.setTargetAtTime(f, audio.currentTime, 0.01);
+    }
+
+    // 12. LEER EL TECLADO (y deslizar el dedo en el celular)
+    const TECLAS_DIR = { ArrowUp: 0, KeyW: 0, ArrowLeft: 1, KeyA: 1, ArrowDown: 2, KeyS: 2, ArrowRight: 3, KeyD: 3 };
+    function entrada(d, enter, atras) {
+      iniciarAudio();
+      if (estado === "titulo") {
+        if (enter) { estado = "elegir"; tiempo = 0; }
+      } else if (estado === "elegir") {
+        if (d === 1) personaje = (personaje + PERSONAJES.length - 1) % PERSONAJES.length;
+        if (d === 3) personaje = (personaje + 1) % PERSONAJES.length;
+        if (d === 0 || d === 2) personaje = (personaje + 4) % PERSONAJES.length;
+        if (enter) empezarJuego();
+        if (atras) { estado = "titulo"; tiempo = 0; }
+      } else if (estado === "intermedio") {
+        if (enter) tiempo = 560;
+      } else {
+        if (d !== undefined && pac) pac.quiero = d;
+      }
+    }
+    document.addEventListener("keydown", function (e) {
+      let d = TECLAS_DIR[e.code];
+      if (d !== undefined || e.code === "Space") e.preventDefault();
+      if (e.code === "KeyM") { mudo = !mudo; return; }
+      if ((e.code === "KeyP" || e.code === "Escape") && (estado === "jugando" || pausado)) { pausado = !pausado; return; }
+      entrada(d, e.key === "Enter" || e.code === "Space", e.code === "Backspace" || e.code === "Escape");
+    });
+    let toque = null;
+    canvas.addEventListener("touchstart", function (e) {
+      toque = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+      e.preventDefault();
+    }, { passive: false });
+    canvas.addEventListener("touchend", function (e) {
+      if (!toque) return;
+      let dx = e.changedTouches[0].clientX - toque.x, dy = e.changedTouches[0].clientY - toque.y;
+      if (Math.hypot(dx, dy) < 20) entrada(undefined, true, false);
+      else entrada(Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 3 : 1) : (dy > 0 ? 2 : 0), false, false);
+      toque = null;
+    });
+
+    // 13. DIBUJAR EL LABERINTO UNA SOLA VEZ (paredes azules de doble línea)
+    const lienzoLab = document.createElement("canvas");
+    const lienzoBlanco = document.createElement("canvas");   // para el parpadeo al pasar de nivel
+    function esPared(x, y) {
+      // Los bloques junto al túnel siguen fuera de la pantalla (para que se vean abiertos)
+      if ((x < 0 || x >= COLS) && y >= 9 && y <= 19 && y !== 14) return true;
+      return x >= 0 && x < COLS && y >= 0 && y < FILAS && MAPA[y][x] === "#";
+    }
+    function dibujarParedes(g, color) {
+      let segmentos = [];
+      for (let y = 0; y < FILAS; y++) {
+        for (let x = -1; x <= COLS; x++) {
+          if (!esPared(x, y)) continue;
+          if (esPared(x + 1, y)) segmentos.push([x, y, x + 1, y]);
+          if (esPared(x, y + 1)) segmentos.push([x, y, x, y + 1]);
+        }
+      }
+      g.lineCap = "round";
+      g.lineJoin = "round";
+      function trazar(ancho, c) {
+        g.strokeStyle = c;
+        g.lineWidth = ancho;
+        g.beginPath();
+        for (let s of segmentos) {
+          g.moveTo(s[0] * T + 4, s[1] * T + 4);
+          g.lineTo(s[2] * T + 4, s[3] * T + 4);
+        }
+        g.stroke();
+      }
+      // Un tubo grueso de color y adentro uno negro un poquito más delgado = solo queda la orilla
+      trazar(6.6, color);
+      trazar(4.8, "#000");
+      g.fillStyle = "#000";
+      for (let y = 0; y < FILAS; y++) {
+        for (let x = -1; x <= COLS; x++) {
+          if (esPared(x, y) && esPared(x + 1, y) && esPared(x, y + 1) && esPared(x + 1, y + 1)) g.fillRect(x * T + 4, y * T + 4, T, T);
+        }
+      }
+      // Puerta rosada de la casa de los fantasmas
+      g.fillStyle = "#ffb8de";
+      g.fillRect(13 * T, 12 * T + 3, 16, 2);
+    }
+    function prepararLaberinto() {
+      let k = RES * ESC;
+      for (let [lienzo, color] of [[lienzoLab, "#2121de"], [lienzoBlanco, "#ffffff"]]) {
+        lienzo.width = Math.ceil(ANCHO_JUEGO * k);
+        lienzo.height = Math.ceil(FILAS * T * k);
+        let g = lienzo.getContext("2d");
+        g.setTransform(k, 0, 0, k, 0, 0);
+        dibujarParedes(g, color);
+      }
+    }
+
+    // 14. DIBUJAR PERSONAJES
+    function ojo(x, y) {
+      ctx.fillStyle = "#000";
+      ctx.beginPath(); ctx.arc(x, y, 1.1, 0, Math.PI * 2); ctx.fill();
+    }
+
+    // El comecocos (o el personaje elegido). "abre" = qué tan abierta está la boca
+    function dibujarComelon(x, y, radio, dir, abre, cual) {
+      let p = PERSONAJES[cual];
+      ctx.save();
+      ctx.translate(x, y);
+      if (dir === 1) ctx.scale(-1, 1);
+      else if (dir === 0) ctx.rotate(-Math.PI / 2);
+      else if (dir === 2) ctx.rotate(Math.PI / 2);
+      ctx.scale(radio / 6.5, radio / 6.5);
+      ctx.fillStyle = p.color;
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.arc(0, 0, 6.5, abre, Math.PI * 2 - abre);
+      ctx.closePath();
+      ctx.fill();
+      switch (p.extra) {
+        case "moño":
+          ojo(0, -3.4);
+          ctx.fillStyle = "#ff0000";
+          ctx.save(); ctx.rotate(-abre); ctx.fillRect(3.2, -1.3, 3, 1.3); ctx.restore();
+          ctx.save(); ctx.rotate(abre); ctx.fillRect(3.2, 0, 3, 1.3); ctx.restore();
+          ctx.beginPath(); ctx.moveTo(-3, -6); ctx.lineTo(-7.5, -9); ctx.lineTo(-6.5, -3.5); ctx.closePath(); ctx.fill();
+          ctx.beginPath(); ctx.moveTo(-3, -6); ctx.lineTo(0.5, -10); ctx.lineTo(-0.5, -5); ctx.closePath(); ctx.fill();
+          ctx.fillStyle = "#2121ff";
+          ctx.beginPath(); ctx.arc(-3, -6, 1.3, 0, Math.PI * 2); ctx.fill();
+          ctx.fillStyle = "#000";
+          ctx.fillRect(-1.5, 3, 1, 1);
+          break;
+        case "gorra":
+          ojo(0.5, -2.6);
+          ctx.fillStyle = "#0d47a1";
+          ctx.beginPath(); ctx.arc(0, 0, 6.8, Math.PI * 1.05, Math.PI * 1.95); ctx.closePath(); ctx.fill();
+          ctx.fillRect(1, -6.4, 6.5, 1.8);
+          break;
+        case "taxi":
+          ojo(0.5, -3.2);
+          ctx.fillStyle = "#222";
+          ctx.fillRect(-3.5, -9.5, 7, 3.4);
+          ctx.fillStyle = "#ffeb3b";
+          for (let i = 0; i < 3; i++) ctx.fillRect(-3 + i * 2.4, -9 + (i % 2) * 1.2, 1.2, 1.2);
+          break;
+        case "bigote":
+          ojo(0.5, -3.4);
+          ctx.fillStyle = "#3e2723";
+          ctx.save(); ctx.rotate(-abre);
+          ctx.beginPath(); ctx.ellipse(3.4, -1.3, 2.9, 1.2, 0, 0, Math.PI * 2); ctx.fill();
+          ctx.restore();
+          break;
+        case "lentes":
+          ctx.fillStyle = "#111";
+          ctx.fillRect(-1.5, -4.8, 6, 2.6);
+          ctx.fillRect(-6, -4.2, 5, 0.9);
+          ctx.fillStyle = "rgba(255, 255, 255, 0.5)";
+          ctx.fillRect(2.5, -4.4, 1, 0.8);
+          break;
+        case "robot":
+          ctx.strokeStyle = "#78909c";
+          ctx.lineWidth = 0.9;
+          ctx.beginPath(); ctx.moveTo(-1, -6.4); ctx.lineTo(-1.5, -9.5); ctx.stroke();
+          ctx.fillStyle = Math.floor(cuadro / 15) % 2 ? "#ff1744" : "#ff8a80";
+          ctx.beginPath(); ctx.arc(-1.5, -9.8, 1.2, 0, Math.PI * 2); ctx.fill();
+          ctx.fillStyle = "#ff1744";
+          ctx.fillRect(-0.5, -4.2, 2.4, 1.6);
+          ctx.fillStyle = "#78909c";
+          for (let [a, b] of [[-4, -1], [-4, 2], [-2, 4.5]]) ctx.fillRect(a, b, 0.9, 0.9);
+          break;
+        case "calabaza":
+          ctx.strokeStyle = "#e65100";
+          ctx.lineWidth = 0.7;
+          ctx.beginPath(); ctx.ellipse(-1, 0, 2.6, 6.2, 0, Math.PI * 0.5, Math.PI * 1.5); ctx.stroke();
+          ctx.fillStyle = "#2e7d32";
+          ctx.fillRect(-1.5, -8.6, 2, 3);
+          ctx.fillStyle = "#3e2723";
+          ctx.beginPath(); ctx.moveTo(-0.5, -2.2); ctx.lineTo(1, -4.8); ctx.lineTo(2.5, -2.2); ctx.closePath(); ctx.fill();
+          break;
+      }
+      ctx.restore();
+    }
+
+    // Cuando lo atrapan: la boca se abre hasta desaparecer
+    function dibujarMuerte(x, y, f, cual) {
+      ctx.save();
+      ctx.translate(x, y);
+      if (f < 1) {
+        ctx.rotate(-Math.PI / 2);
+        let abre = 0.1 + f * (Math.PI - 0.1);
+        ctx.fillStyle = PERSONAJES[cual].color;
+        ctx.beginPath(); ctx.moveTo(0, 0); ctx.arc(0, 0, 6.5, abre, Math.PI * 2 - abre); ctx.closePath(); ctx.fill();
+      } else if (f < 1.3) {
+        ctx.strokeStyle = PERSONAJES[cual].color;
+        ctx.lineWidth = 1;
+        for (let i = 0; i < 8; i++) {
+          let a = i * Math.PI / 4;
+          ctx.beginPath(); ctx.moveTo(Math.cos(a) * 2.5, Math.sin(a) * 2.5); ctx.lineTo(Math.cos(a) * 6, Math.sin(a) * 6); ctx.stroke();
+        }
+      }
+      ctx.restore();
+    }
+
+    // modo: "normal", "azul" (asustado), "blanco" (parpadeo) u "ojos" (comido)
+    function dibujarFantasma(x, y, color, dir, modo) {
+      ctx.save();
+      ctx.translate(x, y);
+      if (modo !== "ojos") {
+        ctx.fillStyle = modo === "azul" ? "#2121ff" : modo === "blanco" ? "#ffffff" : color;
+        ctx.beginPath();
+        ctx.arc(0, -1, 7, Math.PI, 0);
+        ctx.lineTo(7, 7);
+        let picos = Math.floor(cuadro / 8) % 2
+          ? [[5.5, 4.5], [4, 7], [2.5, 7], [1, 4.5], [-1, 4.5], [-2.5, 7], [-4, 7], [-5.5, 4.5], [-7, 7]]
+          : [[6, 5], [4.5, 7], [2.5, 4.5], [0, 7], [-2.5, 4.5], [-4.5, 7], [-6, 5], [-7, 7]];
+        for (let p of picos) ctx.lineTo(p[0], p[1]);
+        ctx.closePath();
+        ctx.fill();
+      }
+      if (modo === "azul" || modo === "blanco") {
+        let cara = modo === "azul" ? "#ffb8ae" : "#ff0000";
+        ctx.fillStyle = cara;
+        ctx.fillRect(-3.5, -3, 2, 2);
+        ctx.fillRect(1.5, -3, 2, 2);
+        ctx.strokeStyle = cara;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(-5, 3.5);
+        for (let i = 0; i < 6; i++) ctx.lineTo(-3.3 + i * 1.7, i % 2 ? 3.5 : 2);
+        ctx.stroke();
+      } else {
+        let ox = DX[dir] * 1.2, oy = DY[dir] * 1.2;
+        ctx.fillStyle = "#fff";
+        for (let s of [-3, 3]) { ctx.beginPath(); ctx.ellipse(s + ox, -2 + oy, 2.3, 3, 0, 0, Math.PI * 2); ctx.fill(); }
+        ctx.fillStyle = "#2121ff";
+        for (let s of [-3, 3]) { ctx.beginPath(); ctx.arc(s + ox * 1.9, -2 + oy * 2, 1.4, 0, Math.PI * 2); ctx.fill(); }
+      }
+      ctx.restore();
+    }
+
+    function circulo(x, y, r) {
+      ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+    }
+    function dibujarFruta(tipo, x, y) {
+      ctx.save();
+      ctx.translate(x, y);
+      switch (tipo) {
+        case "cereza":
+          ctx.strokeStyle = "#de9751"; ctx.lineWidth = 1;
+          ctx.beginPath(); ctx.moveTo(-3, 1); ctx.quadraticCurveTo(0, -4, 4, -6); ctx.moveTo(2.5, 2); ctx.quadraticCurveTo(3, -3, 4, -6); ctx.stroke();
+          ctx.fillStyle = "#ff0000"; circulo(-3, 2.5, 3); circulo(2.5, 3.5, 3);
+          ctx.fillStyle = "#fff"; ctx.fillRect(-4.6, 1.2, 1, 1); ctx.fillRect(0.9, 2.2, 1, 1);
+          break;
+        case "fresa":
+          ctx.fillStyle = "#ff0000";
+          ctx.beginPath(); ctx.moveTo(-6, -3); ctx.quadraticCurveTo(0, -6, 6, -3); ctx.quadraticCurveTo(5, 4, 0, 7); ctx.quadraticCurveTo(-5, 4, -6, -3); ctx.fill();
+          ctx.fillStyle = "#fff";
+          for (let [a, b] of [[-3, -1], [1, -2], [3, 1], [-1, 2], [0, 5], [-4, 2], [2, 4]]) ctx.fillRect(a, b, 0.9, 0.9);
+          ctx.fillStyle = "#00ff00"; ctx.fillRect(-3, -6, 6, 2); ctx.fillRect(-0.5, -7.5, 1, 2);
+          break;
+        case "naranja":
+          ctx.fillStyle = "#ffb852"; circulo(0, 1, 5.5);
+          ctx.fillStyle = "#00c000"; ctx.beginPath(); ctx.ellipse(2.5, -5, 2.6, 1.2, -0.4, 0, Math.PI * 2); ctx.fill();
+          ctx.fillStyle = "#de9751"; ctx.fillRect(-0.5, -6, 1, 2.5);
+          break;
+        case "manzana":
+          ctx.fillStyle = "#ff0000"; circulo(-2, 1, 4.5); circulo(2, 1, 4.5);
+          ctx.fillStyle = "#de9751"; ctx.fillRect(-0.4, -6.5, 1, 4);
+          ctx.fillStyle = "#fff"; ctx.fillRect(-4, -1, 1, 2);
+          break;
+        case "melon":
+          ctx.fillStyle = "#7cd36b"; circulo(0, 1, 5.8);
+          ctx.strokeStyle = "#1b7a1b"; ctx.lineWidth = 0.8;
+          for (let i = -1; i <= 1; i++) { ctx.beginPath(); ctx.ellipse(i * 2.4, 1, 1.2, 5.4, 0, 0, Math.PI * 2); ctx.stroke(); }
+          ctx.fillStyle = "#de9751"; ctx.fillRect(-0.5, -6.5, 1, 2.5);
+          break;
+        case "nave":
+          ctx.fillStyle = "#2121ff";
+          ctx.beginPath(); ctx.moveTo(-1, -1); ctx.lineTo(-6.5, -4); ctx.lineTo(-6.5, 2); ctx.lineTo(-1, 4); ctx.closePath(); ctx.fill();
+          ctx.beginPath(); ctx.moveTo(1, -1); ctx.lineTo(6.5, -4); ctx.lineTo(6.5, 2); ctx.lineTo(1, 4); ctx.closePath(); ctx.fill();
+          ctx.fillStyle = "#ffff00";
+          ctx.beginPath(); ctx.moveTo(0, -6); ctx.lineTo(2, -1); ctx.lineTo(0, 6); ctx.lineTo(-2, -1); ctx.closePath(); ctx.fill();
+          ctx.fillStyle = "#ff0000";
+          ctx.fillRect(-7, -6, 1.8, 3); ctx.fillRect(5.2, -6, 1.8, 3); ctx.fillRect(-0.9, -7.5, 1.8, 1.8);
+          break;
+        case "campana":
+          ctx.fillStyle = "#ffff00";
+          ctx.beginPath(); ctx.moveTo(-6, 4); ctx.quadraticCurveTo(-5, -6.5, 0, -6.5); ctx.quadraticCurveTo(5, -6.5, 6, 4); ctx.closePath(); ctx.fill();
+          ctx.fillStyle = "#5ad7ff"; ctx.fillRect(-6, 3.5, 12, 1.5);
+          ctx.fillStyle = "#fff"; circulo(0, 5.8, 1.5); ctx.fillRect(-3, -3, 1, 4);
+          break;
+        case "llave":
+          ctx.fillStyle = "#5ad7ff";
+          ctx.beginPath(); ctx.ellipse(0, -4, 3.6, 2.6, 0, 0, Math.PI * 2); ctx.fill();
+          ctx.fillStyle = "#000"; ctx.fillRect(-1.5, -4.5, 3, 1);
+          ctx.fillStyle = "#fff";
+          ctx.fillRect(-0.8, -1.5, 1.6, 8.5); ctx.fillRect(0.8, 3, 2, 1); ctx.fillRect(0.8, 5.2, 2, 1);
+          break;
+      }
+      ctx.restore();
+    }
+
+    // 15. TEXTOS Y MARCADOR
+    function letrero(s, x, y, color, alinear, tamaño) {
+      ctx.font = (tamaño || 8) + "px 'Press Start 2P', monospace";
+      ctx.textAlign = alinear || "left";
+      ctx.textBaseline = "top";
+      ctx.fillStyle = color;
+      ctx.fillText(s, x, y);
+    }
+
+    function dibujarMarcador() {
+      let parpadea = (estado === "jugando" || estado === "listo") && Math.floor(cuadro / 16) % 2;
+      if (!parpadea) letrero("1UP", 24, 0, "#fff");
+      letrero("RÉCORD", 112, 0, "#fff", "center");
+      letrero(puntos ? String(puntos) : "00", 56, 8, "#fff", "right");
+      letrero(record ? String(record) : "", 152, 8, "#fff", "right");
+    }
+
+    function dibujarPie() {
+      for (let i = 0; i < vidas - 1 && i < 5; i++) dibujarComelon(24 + i * 16, 280, 6.5, 1, 0.55, personaje);
+      let ultimas = historialFrutas.slice(-7);
+      for (let i = 0; i < ultimas.length; i++) dibujarFruta(ultimas[ultimas.length - 1 - i], 208 - i * 16, 280);
+    }
+
+    function aberturaBoca() {
+      if (estado === "listo") return 0.05;
+      if (pac.parado) return 0.5;
+      return [0.05, 0.4, 0.8, 0.4][Math.floor(pac.boca / 2.2) % 4];
+    }
+
+    function dibujarJuego() {
+      let lleno = estado === "nivelCompleto" && tiempo >= 60;
+      let blanco = lleno && Math.floor((tiempo - 60) / 12) % 2 === 1;
+      ctx.drawImage(blanco ? lienzoBlanco : lienzoLab, 0, ARRIBA, ANCHO_JUEGO, FILAS * T);
+
+      // Puntitos y pastillas
+      ctx.fillStyle = "#ffb8ae";
+      let pastillaVisible = estado !== "jugando" || Math.floor(cuadro / 10) % 2 === 0;
+      for (let y = 0; y < FILAS; y++) {
+        for (let x = 0; x < COLS; x++) {
+          let c = mapa[y][x];
+          if (c === ".") ctx.fillRect(x * T + 3, ARRIBA + y * T + 3, 2, 2);
+          else if (c === "o" && pastillaVisible) circulo(x * T + 4, ARRIBA + y * T + 4, 4);
+        }
+      }
+      if (fruta) dibujarFruta(fruta.tipo, 112, ARRIBA + 140);
+
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(0, ARRIBA, ANCHO_JUEGO, FILAS * T);
+      ctx.clip();
+      let sinFantasmas = (estado === "muerte" && tiempo >= 60) || lleno;
+      if (!sinFantasmas) {
+        for (let g of fantasmas) {
+          if (congelado > 0 && g === fantasmaComido) continue;
+          let modo = "normal";
+          if (g.estado === "ojos" || g.estado === "entrando") modo = "ojos";
+          else if (g.asustado) {
+            let destellos = DESTELLOS[nivel - 1] || 0;
+            modo = susto < destellos * 28 && Math.floor(susto / 14) % 2 === 0 ? "blanco" : "azul";
+          }
+          dibujarFantasma(g.x, ARRIBA + g.y, g.color, g.dir, modo);
+        }
+      }
+      if (estado === "muerte" && tiempo >= 60) {
+        dibujarMuerte(pac.x, ARRIBA + pac.y, (tiempo - 60) / 90, personaje);
+      } else if (congelado === 0) {
+        dibujarComelon(pac.x, ARRIBA + pac.y, 6.5, pac.dir, aberturaBoca(), personaje);
+      }
+      ctx.restore();
+
+      for (let f of flotantes) letrero(f.texto, f.x, ARRIBA + f.y - 3, f.color, "center", 6);
+
+      if (estado === "listo") letrero("¡LISTO!", 112, ARRIBA + 17 * T, "#ffff00", "center");
+      if (estado === "gameover") letrero("GAME  OVER", 112, ARRIBA + 17 * T, "#ff0000", "center");
+      if (pausado) letrero("PAUSA", 112, ARRIBA + 17 * T, "#ffff00", "center");
+      dibujarPie();
+    }
+
+    // 16. PANTALLA DE INICIO
+    function dibujarTitulo() {
+      letrero("PERSONAJE / APODO", 56, 40, "#fff");
+      for (let i = 0; i < 4; i++) {
+        let f = FANTASMAS[i], y = 56 + i * 24;
+        if (tiempo > 30 + i * 60) dibujarFantasma(36, y + 3, f.color, 3, "normal");
+        if (tiempo > 50 + i * 60) letrero("-" + f.caracter, 56, y, f.color);
+        if (tiempo > 70 + i * 60) letrero('"' + f.apodo + '"', 136, y, f.color);
+      }
+      if (tiempo > 300) {
+        ctx.fillStyle = "#ffb8ae";
+        ctx.fillRect(83, 195, 2, 2);
+        letrero("10 PTS", 96, 192, "#fff");
+        if (Math.floor(cuadro / 10) % 2 === 0) circulo(84, 212, 4);
+        letrero("50 PTS", 96, 208, "#fff");
+      }
+      // Persecución de muestra
+      if (tiempo > 330) {
+        let f = (tiempo - 330) % 460, y = 166;
+        if (f < 190) {
+          if (Math.floor(cuadro / 10) % 2 === 0) { ctx.fillStyle = "#ffb8ae"; circulo(32, y, 4); }
+          let px = 230 - f;
+          dibujarComelon(px, y, 6.5, 1, [0.05, 0.4, 0.8, 0.4][Math.floor(f / 3) % 4], personaje);
+          for (let i = 0; i < 4; i++) dibujarFantasma(255 + i * 16 - f * 1.05, y, FANTASMAS[i].color, 1, "normal");
+        } else {
+          let s = f - 190, px = 40 + s * 1.2;
+          dibujarComelon(px, y, 6.5, 3, [0.05, 0.4, 0.8, 0.4][Math.floor(s / 3) % 4], personaje);
+          for (let i = 0; i < 4; i++) {
+            let gx = 55.5 + i * 16 + s * 0.55;
+            let atrapado = (15.5 + i * 16) / 0.65;
+            if (s < atrapado) dibujarFantasma(gx, y, FANTASMAS[i].color, 3, "azul");
+            else if (s < atrapado + 40) letrero(String(200 * Math.pow(2, i)), gx, y - 3, "#00ffff", "center", 6);
+          }
+        }
+      }
+      if (Math.floor(cuadro / 30) % 2 === 0) letrero("PRESIONA ENTER", 112, 248, "#ffb852", "center");
+      letrero("M: SONIDO   P: PAUSA", 112, 268, "#888", "center", 6);
+    }
+
+    // 17. ELEGIR PERSONAJE
+    function dibujarElegir() {
+      letrero("ELIGE TU PERSONAJE", 112, 40, "#ffff00", "center");
+      for (let i = 0; i < PERSONAJES.length; i++) {
+        let x = 28 + (i % 4) * 56, y = 92 + Math.floor(i / 4) * 64;
+        let elegido = i === personaje;
+        if (elegido) {
+          ctx.strokeStyle = Math.floor(cuadro / 15) % 2 ? "#ffff00" : "#ffb852";
+          ctx.lineWidth = 1.5;
+          ctx.strokeRect(x - 24, y - 24, 48, 48);
+        }
+        let abre = elegido ? [0.05, 0.4, 0.8, 0.4][Math.floor(cuadro / 5) % 4] : 0.5;
+        dibujarComelon(x, y, 15, 3, abre, i);
+      }
+      let p = PERSONAJES[personaje];
+      letrero(p.nombre, 112, 200, p.color, "center");
+      letrero(p.texto, 112, 216, "#fff", "center", 6);
+      // Un fantasma persiguiendo al elegido
+      let x = (cuadro * 1.2) % 300 - 40;
+      dibujarComelon(x, 240, 6.5, 3, [0.05, 0.4, 0.8, 0.4][Math.floor(cuadro / 3) % 4], personaje);
+      dibujarFantasma(x - 24, 240, "#ff0000", 3, "normal");
+      letrero("FLECHAS: ELEGIR  ENTER: JUGAR", 112, 262, "#888", "center", 6);
+    }
+
+    // 18. ESCENITA ENTRE NIVELES
+    function dibujarIntermedio() {
+      let y = 150;
+      if (tiempo < 260) {
+        let px = 250 - tiempo;
+        dibujarComelon(px, y, 6.5, 1, [0.05, 0.4, 0.8, 0.4][Math.floor(tiempo / 3) % 4], personaje);
+        dibujarFantasma(px + 30 - tiempo * 0.05, y, "#ff0000", 1, "normal");
+      } else if (tiempo >= 280) {
+        let f = tiempo - 280;
+        dibujarFantasma(-20 + f * 0.8, y, "#2121ff", 3, "azul");
+        dibujarComelon(-60 + f * 0.95, y - 8, 18, 3, [0.05, 0.4, 0.8, 0.4][Math.floor(f / 4) % 4], personaje);
+      }
+      dibujarPie();
+    }
+
+    // 19. DIBUJAR TODO
+    function dibujar() {
+      ctx.setTransform(RES, 0, 0, RES, 0, 0);
+      ctx.fillStyle = "#000";
+      ctx.fillRect(0, 0, PW, PH);
+      ctx.setTransform(RES * ESC, 0, 0, RES * ESC, RES * OX, RES * OY);
+      dibujarMarcador();
+      if (estado === "titulo") dibujarTitulo();
+      else if (estado === "elegir") dibujarElegir();
+      else if (estado === "intermedio") dibujarIntermedio();
+      else dibujarJuego();
+    }
+
+    // 20. EL BUCLE DEL JUEGO (siempre 60 pasos por segundo, como la maquinita)
+    let tiempoAnterior = performance.now();
+    let acumulado = 0;
+    function bucle(ahora) {
+      acumulado += Math.min(100, ahora - tiempoAnterior);
+      tiempoAnterior = ahora;
+      while (acumulado >= 1000 / 60) {
+        paso();
+        acumulado -= 1000 / 60;
+      }
+      dibujar();
+      requestAnimationFrame(bucle);
+    }
+
+    // 21. ¡EMPEZAR!
+    ajustarPantalla();
+    mapa = MAPA.map(fila => fila.split(""));
+    requestAnimationFrame(bucle);
+  </script>
+</body>
+</html>

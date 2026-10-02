@@ -1,0 +1,1790 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <title>Atrapa Monedas</title>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      background: #1e1e2e;
+      font-family: Arial, sans-serif;
+    }
+    canvas {
+      display: block;
+      background: #562d6a;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="juego"></canvas>
+
+  <script>
+    // 1. PREPARAR EL LIENZO (ocupa toda la pantalla)
+    const canvas = document.getElementById("juego");
+    const ctx = canvas.getContext("2d");
+
+    // 2. REGLAS DEL JUEGO
+    const MONEDAS_POR_NIVEL = 5;
+    const NIVEL_FINAL = 20;
+    const NIVEL_ARMAS = 5;         // desde este nivel los cactus disparan y sale la burbuja con arma
+    const NIVEL_ARMA_DOBLE = 5;    // desde este nivel sale la burbuja con arma doble
+    const NIVEL_MALVADOS = 10;     // desde este nivel los cactus son rojos y malvados (y tienes 10 vidas)
+    const DURACION_ESCUDO = 600;   // 10 segundos (60 cuadros por segundo)
+    const DURACION_ARMA = 1200;    // 20 segundos
+    const CADA_CUANTO_BURBUJA = 300;   // sale una burbuja cada 5 segundos
+
+    // 3. VARIABLES DEL JUEGO
+    let jugador = { x: 0, y: 0, lado: 40, velocidad: 5 };
+    let moneda = { x: 100, y: 100, radio: 12 };
+    let cactus = [];
+    let balas = [];              // balas de los cactus
+    let misBalas = [];           // balas del jugador
+    let explosiones = [];
+    let burbujas = [];           // burbujas de poder (puede haber varias a la vez)
+    let cuadrosParaBurbuja = 0;  // cuánto falta para que salga otra burbuja
+    let teclas = {};
+    let estado = "inicio";   // "inicio", "aviso", "jugando", "menu", "personajes", "perdido", "ganado"
+    let nivel = 1;
+    let vidas = 3;
+    let monedasNivel = 0;    // monedas atrapadas en este nivel
+    let puntos = 0;          // monedas atrapadas en toda la partida
+    let invencible = 0;      // cuadros que el jugador es invencible después de pincharse
+    let molesto = 0;         // cuadros que el jugador tiene cara de molesto
+    let escudo = 0;          // cuadros que le quedan al escudo
+    let arma = 0;            // cuadros que le quedan al arma del jugador
+    let armaDoble = false;   // ¿el arma dispara 2 bolitas?
+    let recargaArma = 0;     // espera entre disparos del jugador
+    let direccion = { x: 1, y: 0 };   // hacia dónde mira el jugador (para disparar)
+    let avisoCuadros = 0;    // cuánto dura el aviso "¡Nivel X!"
+
+    // Personajes que se pueden elegir
+    const PERSONAJES = [
+      { id: "bolita",   nombre: "Bolita" },
+      { id: "gatito",   nombre: "Gatito" },
+      { id: "pollito",  nombre: "Pollito" },
+      { id: "robot",    nombre: "Robot" },
+      { id: "fantasma", nombre: "Fantasmita" }
+    ];
+    let personajeElegido = 0;
+    let cursorPersonaje = 0;   // cuál está marcado en la pantalla de elegir personaje
+
+    // Recordar el personaje aunque se cierre el navegador
+    try {
+      let guardado = parseInt(localStorage.getItem("personaje"));
+      if (guardado >= 0 && guardado < PERSONAJES.length) personajeElegido = guardado;
+    } catch (e) {}
+    function guardarPersonaje() {
+      try { localStorage.setItem("personaje", personajeElegido); } catch (e) {}
+    }
+
+    // Menú de pausa
+    const OPCIONES_MENU = ["▶ Seguir jugando", "🎭 Cambiar personaje", "🔄 Reiniciar desde el nivel 1"];
+    let opcionMenu = 0;
+
+    // El fondo se dibuja una sola vez por nivel en un lienzo aparte (así el juego va rápido)
+    const fondo = document.createElement("canvas");
+
+    // 4. AJUSTAR EL JUEGO AL TAMAÑO DE LA VENTANA
+    function ajustarPantalla() {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+
+      // Que nada quede fuera de la pantalla después de cambiar el tamaño
+      jugador.x = Math.min(jugador.x, canvas.width - jugador.lado);
+      jugador.y = Math.min(jugador.y, canvas.height - jugador.lado);
+      for (let c of cactus) {
+        c.x = Math.min(c.x, canvas.width - c.ancho);
+        c.y = Math.min(c.y, canvas.height - c.alto);
+      }
+      if (moneda.x > canvas.width - 20 || moneda.y > canvas.height - 20) {
+        nuevaMoneda();
+      }
+      prepararFondo();
+    }
+    window.addEventListener("resize", ajustarPantalla);
+
+    // 5. LEER EL TECLADO
+    // Se usa e.code (la tecla física) para que la barra baja funcione con o sin Shift
+    document.addEventListener("keydown", function (e) {
+      teclas[e.code] = true;
+
+      // Que las flechas y la barra espaciadora no muevan la página
+      if (e.code.startsWith("Arrow") || e.code === "Space") e.preventDefault();
+
+      if (e.code === "Backspace") e.preventDefault();
+      let enter = e.key === "Enter";
+
+      if (estado === "jugando") {
+        // Backspace abre el menú de pausa
+        if (e.code === "Backspace") {
+          estado = "menu";
+          opcionMenu = 0;
+        }
+
+      } else if (estado === "menu") {
+        // Moverse por el menú con ↑ ↓ y elegir con Enter
+        if (e.code === "ArrowUp")   opcionMenu = (opcionMenu + OPCIONES_MENU.length - 1) % OPCIONES_MENU.length;
+        if (e.code === "ArrowDown") opcionMenu = (opcionMenu + 1) % OPCIONES_MENU.length;
+        if (e.code === "Backspace") estado = "jugando";
+        if (enter) {
+          if (opcionMenu === 0) estado = "jugando";
+          if (opcionMenu === 1) { estado = "personajes"; cursorPersonaje = personajeElegido; }
+          if (opcionMenu === 2) nuevaPartida();
+        }
+
+      } else if (estado === "personajes") {
+        // Elegir personaje con ← → y confirmar con Enter
+        if (e.code === "ArrowLeft")  cursorPersonaje = (cursorPersonaje + PERSONAJES.length - 1) % PERSONAJES.length;
+        if (e.code === "ArrowRight") cursorPersonaje = (cursorPersonaje + 1) % PERSONAJES.length;
+        if (e.code === "Backspace") estado = "menu";
+        if (enter) {
+          personajeElegido = cursorPersonaje;
+          guardarPersonaje();
+          estado = "menu";
+        }
+
+      } else if (estado === "inicio") {
+        // En la pantalla de inicio también se puede elegir personaje
+        if (e.code === "ArrowLeft")  personajeElegido = (personajeElegido + PERSONAJES.length - 1) % PERSONAJES.length;
+        if (e.code === "ArrowRight") personajeElegido = (personajeElegido + 1) % PERSONAJES.length;
+        if (e.code === "ArrowLeft" || e.code === "ArrowRight") guardarPersonaje();
+        if (enter) nuevaPartida();
+
+      } else if (estado === "perdido" || estado === "ganado") {
+        // Volver a jugar con Enter
+        if (enter) nuevaPartida();
+      }
+    });
+
+    document.addEventListener("keyup", function (e) {
+      teclas[e.code] = false;
+    });
+
+    // Disparar con la tecla de la barra baja ( _ ) o con la barra espaciadora
+    function apretandoDisparo() {
+      return teclas["Slash"] ||           // tecla - _ en teclado español
+             teclas["Minus"] ||           // tecla - _ en teclado inglés
+             teclas["NumpadSubtract"] ||
+             teclas["Space"];
+    }
+
+    // 6. FUNCIONES DE AYUDA
+
+    // Cada nivel tiene más cactus y más rápidos
+    function cantidadDeCactus() {
+      return 2 + nivel;                        // nivel 1: 3 cactus ... nivel 20: 22 cactus
+    }
+    function velocidadDeCactus() {
+      return 0.8 + (nivel - 1) * 0.17;         // nivel 1: lento ... nivel 20: casi como el jugador
+    }
+    function cantidadDeArmados() {
+      if (nivel < NIVEL_ARMAS) return 0;
+      return Math.min(cantidadDeCactus(), nivel - 3);   // nivel 5: 2 armados ... nivel 20: 17
+    }
+    function tiempoEntreDisparos() {
+      return Math.max(80, 220 - (nivel - NIVEL_ARMAS) * 8) + Math.random() * 60;
+    }
+    function velocidadDeBala() {
+      return 3.5 + (nivel - NIVEL_ARMAS) * 0.15;
+    }
+    function vidasDelNivel() {
+      return nivel >= NIVEL_MALVADOS ? 10 : 3;
+    }
+
+    function centroDelJugador() {
+      return { x: jugador.x + jugador.lado / 2, y: jugador.y + jugador.lado / 2 };
+    }
+
+    // Ángulo desde la mano del cactus hacia el jugador
+    function anguloHaciaJugador(c) {
+      let j = centroDelJugador();
+      return Math.atan2(j.y - (c.y + 32), j.x - (c.x + c.ancho / 2));
+    }
+
+    function centrarJugador() {
+      jugador.x = canvas.width / 2 - jugador.lado / 2;
+      jugador.y = canvas.height / 2 - jugador.lado / 2;
+    }
+
+    // ¿Un punto (x, y) está cerca de un cactus? (con un margen extra)
+    function cercaDeCactus(x, y, margen) {
+      return cactus.some(c =>
+        x > c.x - margen && x < c.x + c.ancho + margen &&
+        y > c.y - margen && y < c.y + c.alto + margen);
+    }
+
+    // Poner la moneda en un lugar al azar, lejos de los cactus y del marcador de arriba
+    function nuevaMoneda() {
+      let intentos = 0;
+      do {
+        moneda.x = Math.random() * (canvas.width - 60) + 30;
+        moneda.y = Math.random() * (canvas.height - 120) + 90;
+        intentos++;
+      } while (cercaDeCactus(moneda.x, moneda.y, 25) && intentos < 50);
+    }
+
+    // Crear un cactus que se mueve, lejos del jugador
+    function crearCactus(armado) {
+      let nuevo;
+      for (let intentos = 0; intentos < 30; intentos++) {
+        nuevo = {
+          x: Math.random() * (canvas.width - 56) + 10,
+          y: Math.random() * (canvas.height - 150) + 90,
+          ancho: 36,
+          alto: 50
+        };
+        let j = centroDelJugador();
+        let distancia = Math.hypot(nuevo.x + nuevo.ancho / 2 - j.x, nuevo.y + nuevo.alto / 2 - j.y);
+        if (distancia > 220) break;
+      }
+
+      // Dirección al azar
+      let angulo = Math.random() * Math.PI * 2;
+      nuevo.vx = Math.cos(angulo) * velocidadDeCactus();
+      nuevo.vy = Math.sin(angulo) * velocidadDeCactus();
+
+      // Si tiene arma, el primer disparo llega en un tiempo al azar (para que no disparen todos juntos)
+      nuevo.armado = armado;
+      nuevo.recarga = 60 + Math.random() * tiempoEntreDisparos();
+      cactus.push(nuevo);
+    }
+
+    // Programar cuándo sale la siguiente burbuja (cada 5 segundos)
+    function esperarBurbuja() {
+      cuadrosParaBurbuja = CADA_CUANTO_BURBUJA;
+    }
+
+    function crearBurbuja() {
+      // Qué poderes pueden salir en este nivel
+      let tipos = ["escudo"];
+      if (nivel >= NIVEL_ARMAS) tipos.push("arma");
+      if (nivel >= NIVEL_ARMA_DOBLE) tipos.push("doble");
+
+      burbujas.push({
+        tipo: tipos[Math.floor(Math.random() * tipos.length)],
+        x: Math.random() * (canvas.width - 100) + 50,
+        y: Math.random() * (canvas.height - 160) + 100,
+        radio: 20,
+        vida: 480,        // desaparece después de 8 segundos
+        onda: 0           // para que flote de arriba a abajo
+      });
+    }
+
+    function empezarNivel(n) {
+      nivel = n;
+      vidas = vidasDelNivel();
+      monedasNivel = 0;
+      invencible = 0;
+      molesto = 0;
+      balas = [];
+      misBalas = [];
+      explosiones = [];
+      burbujas = [];
+      esperarBurbuja();
+      centrarJugador();
+      cactus = [];
+      for (let i = 0; i < cantidadDeCactus(); i++) {
+        crearCactus(i < cantidadDeArmados());
+      }
+      nuevaMoneda();
+      prepararFondo();   // cada nivel tiene su propio escenario
+
+      // Mostrar "¡Nivel X!" durante 2 segundos antes de jugar
+      estado = "aviso";
+      avisoCuadros = 120;
+    }
+
+    function nuevaPartida() {
+      puntos = 0;
+      escudo = 0;
+      arma = 0;
+      empezarNivel(1);
+    }
+
+    function perderVida() {
+      vidas = vidas - 1;
+      molesto = 120;          // pone cara de molesto 2 segundos
+      if (vidas <= 0) {
+        estado = "perdido";   // con Enter vuelve al nivel 1
+        return;
+      }
+      // Volver al centro, borrar las balas y ser invencible 2 segundos para escapar
+      centrarJugador();
+      balas = [];
+      invencible = 120;
+    }
+
+    function disparar() {
+      let j = centroDelJugador();
+      let velocidad = 9;
+      let salidas = [0];
+      if (armaDoble) salidas = [-9, 9];   // dos bolitas, una al lado de la otra
+
+      for (let s of salidas) {
+        // correr la bolita hacia un lado (perpendicular a la dirección)
+        misBalas.push({
+          x: j.x + direccion.x * 24 - direccion.y * s,
+          y: j.y + direccion.y * 24 + direccion.x * s,
+          vx: direccion.x * velocidad,
+          vy: direccion.y * velocidad,
+          radio: 5
+        });
+      }
+    }
+
+    // 7. ACTUALIZAR (mover y revisar choques)
+    function actualizar() {
+      // Mover al jugador con las flechas
+      let dx = 0, dy = 0;
+      if (teclas["ArrowLeft"])  dx -= 1;
+      if (teclas["ArrowRight"]) dx += 1;
+      if (teclas["ArrowUp"])    dy -= 1;
+      if (teclas["ArrowDown"])  dy += 1;
+      jugador.x += dx * jugador.velocidad;
+      jugador.y += dy * jugador.velocidad;
+
+      // Recordar hacia dónde se movió por última vez (para disparar hacia allá)
+      if (dx !== 0 || dy !== 0) {
+        let largo = Math.hypot(dx, dy);
+        direccion = { x: dx / largo, y: dy / largo };
+      }
+
+      // El borde es una pared: no dejar que se salga de la pantalla
+      if (jugador.x < 0) jugador.x = 0;
+      if (jugador.y < 0) jugador.y = 0;
+      if (jugador.x > canvas.width - jugador.lado)  jugador.x = canvas.width - jugador.lado;
+      if (jugador.y > canvas.height - jugador.lado) jugador.y = canvas.height - jugador.lado;
+
+      // Mover los cactus (rebotan en las paredes) y disparar
+      for (let c of cactus) {
+        c.x += c.vx;
+        c.y += c.vy;
+        if (c.x < 0 || c.x > canvas.width - c.ancho)  c.vx = -c.vx;
+        if (c.y < 0 || c.y > canvas.height - c.alto)  c.vy = -c.vy;
+        c.x = Math.max(0, Math.min(c.x, canvas.width - c.ancho));
+        c.y = Math.max(0, Math.min(c.y, canvas.height - c.alto));
+
+        if (c.armado) {
+          c.recarga--;
+          if (c.recarga <= 0) {
+            // Dispara en línea recta hacia donde está el jugador ahora
+            let angulo = anguloHaciaJugador(c);
+            balas.push({
+              x: c.x + c.ancho / 2 + Math.cos(angulo) * 24,
+              y: c.y + 32 + Math.sin(angulo) * 24,
+              vx: Math.cos(angulo) * velocidadDeBala(),
+              vy: Math.sin(angulo) * velocidadDeBala(),
+              radio: 5
+            });
+            c.recarga = tiempoEntreDisparos();
+          }
+        }
+      }
+
+      // El arma del jugador
+      if (arma > 0) {
+        arma--;
+        if (recargaArma > 0) recargaArma--;
+        if (apretandoDisparo() && recargaArma === 0) {
+          disparar();
+          recargaArma = 15;   // unos 4 disparos por segundo
+        }
+      }
+
+      // Mover todas las balas y borrar las que salen de la pantalla
+      function dentroDePantalla(b) {
+        return b.x > -10 && b.x < canvas.width + 10 && b.y > -10 && b.y < canvas.height + 10;
+      }
+      for (let b of balas)    { b.x += b.vx; b.y += b.vy; }
+      for (let b of misBalas) { b.x += b.vx; b.y += b.vy; }
+      balas = balas.filter(dentroDePantalla);
+      misBalas = misBalas.filter(dentroDePantalla);
+
+      // ¿Mis balas le pegaron a un cactus? → el cactus desaparece con una explosión
+      for (let b of misBalas) {
+        for (let c of cactus) {
+          if (!c.eliminado &&
+              b.x > c.x - b.radio && b.x < c.x + c.ancho + b.radio &&
+              b.y > c.y - b.radio && b.y < c.y + c.alto + b.radio) {
+            c.eliminado = true;
+            b.usada = true;
+            explosiones.push({ x: c.x + c.ancho / 2, y: c.y + c.alto / 2, cuadro: 0 });
+            break;
+          }
+        }
+      }
+      cactus = cactus.filter(c => !c.eliminado);
+      misBalas = misBalas.filter(b => !b.usada);
+
+      // Avanzar las explosiones
+      for (let e of explosiones) e.cuadro++;
+      explosiones = explosiones.filter(e => e.cuadro < 25);
+
+      // Burbujas de poder: sale una cada 5 segundos, flotan y se van si no las agarras
+      cuadrosParaBurbuja--;
+      if (cuadrosParaBurbuja <= 0) {
+        crearBurbuja();
+        esperarBurbuja();
+      }
+      for (let bu of burbujas) {
+        bu.vida--;
+        bu.onda += 0.05;
+      }
+
+      let j = centroDelJugador();
+
+      // ¿El jugador agarró una burbuja?
+      for (let bu of burbujas) {
+        let yBurbuja = bu.y + Math.sin(bu.onda) * 6;
+        if (Math.hypot(j.x - bu.x, j.y - yBurbuja) < jugador.lado / 2 + bu.radio) {
+          if (bu.tipo === "escudo") {
+            escudo = DURACION_ESCUDO;
+          } else {
+            arma = DURACION_ARMA;
+            armaDoble = bu.tipo === "doble";
+            recargaArma = 0;
+          }
+          bu.agarrada = true;
+        }
+      }
+      burbujas = burbujas.filter(bu => bu.vida > 0 && !bu.agarrada);
+
+      // Bajar los contadores
+      if (escudo > 0) escudo--;
+      if (invencible > 0) invencible--;
+      if (molesto > 0) molesto--;
+
+      if (escudo > 0) {
+        // El escudo destruye las balas que lo tocan
+        balas = balas.filter(b => Math.hypot(b.x - j.x, b.y - j.y) > 34 + b.radio);
+      } else if (invencible === 0) {
+        // ¿El jugador tocó un cactus? (margen de 6 px porque el jugador es redondo)
+        const margen = 6;
+        for (let c of cactus) {
+          if (jugador.x < c.x + c.ancho - margen &&
+              jugador.x + jugador.lado > c.x + margen &&
+              jugador.y < c.y + c.alto - margen &&
+              jugador.y + jugador.lado > c.y + margen) {
+            perderVida();
+            return;
+          }
+        }
+
+        // ¿Le pegó una bala?
+        for (let b of balas) {
+          if (Math.hypot(b.x - j.x, b.y - j.y) < jugador.lado / 2 + b.radio) {
+            perderVida();
+            return;
+          }
+        }
+      }
+
+      // ¿El jugador tocó la moneda?
+      let distancia = Math.hypot(j.x - moneda.x, j.y - moneda.y);
+
+      if (distancia < jugador.lado / 2 + moneda.radio) {
+        puntos = puntos + 1;
+        monedasNivel = monedasNivel + 1;
+
+        if (monedasNivel >= MONEDAS_POR_NIVEL) {
+          if (nivel >= NIVEL_FINAL) {
+            estado = "ganado";
+          } else {
+            empezarNivel(nivel + 1);
+          }
+        } else {
+          nuevaMoneda();
+        }
+      }
+    }
+
+    // 8. DIBUJAR UN CACTUS (con cara, y con arma o antifaz según el nivel)
+    function dibujarCactus(c) {
+      let centro = c.x + c.ancho / 2;
+      let malvado = nivel >= NIVEL_MALVADOS;
+
+      // Sombra oscura detrás, para que el cactus se vea bien sobre cualquier fondo
+      ctx.fillStyle = "rgba(0, 0, 0, 0.3)";
+      ctx.beginPath();
+      ctx.ellipse(centro, c.y + c.alto / 2, c.ancho * 0.7, c.alto * 0.62, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = malvado ? "#c62828" : "#2e8b3a";
+
+      // Tronco (con la punta redonda)
+      ctx.fillRect(centro - 8, c.y + 8, 16, c.alto - 8);
+      ctx.beginPath();
+      ctx.arc(centro, c.y + 8, 8, Math.PI, 0);
+      ctx.fill();
+
+      // Brazo izquierdo
+      ctx.fillRect(c.x + 1, c.y + 26, centro - 9 - c.x, 6);
+      ctx.fillRect(c.x + 1, c.y + 14, 6, 18);
+      ctx.beginPath();
+      ctx.arc(c.x + 4, c.y + 14, 3, Math.PI, 0);
+      ctx.fill();
+
+      // Brazo derecho
+      ctx.fillRect(centro + 8, c.y + 20, c.x + c.ancho - centro - 9, 6);
+      ctx.fillRect(c.x + c.ancho - 7, c.y + 8, 6, 18);
+      ctx.beginPath();
+      ctx.arc(c.x + c.ancho - 4, c.y + 8, 3, Math.PI, 0);
+      ctx.fill();
+
+      // Espinas
+      ctx.strokeStyle = malvado ? "#ffb4a8" : "#f0f0d0";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      for (let y = c.y + 28; y < c.y + c.alto - 2; y += 7) {
+        ctx.moveTo(centro - 8, y);     ctx.lineTo(centro - 12, y - 2);
+        ctx.moveTo(centro + 8, y + 3); ctx.lineTo(centro + 12, y + 1);
+      }
+      ctx.moveTo(centro, c.y);                ctx.lineTo(centro, c.y - 4);
+      ctx.moveTo(c.x + 4, c.y + 11);          ctx.lineTo(c.x + 4, c.y + 7);
+      ctx.moveTo(c.x + c.ancho - 4, c.y + 5); ctx.lineTo(c.x + c.ancho - 4, c.y + 1);
+      ctx.stroke();
+
+      // Arena en la base
+      ctx.fillStyle = "#c9a15a";
+      ctx.fillRect(c.x, c.y + c.alto - 3, c.ancho, 3);
+
+      // --- CARA ---
+      let j = centroDelJugador();
+      let mirar = Math.atan2(j.y - (c.y + 13), j.x - centro);   // los ojos miran al jugador
+      let mx = Math.cos(mirar) * 1.3;
+      let my = Math.sin(mirar) * 1.3;
+
+      // Antifaz negro (solo los malvados)
+      if (malvado) {
+        ctx.fillStyle = "#111";
+        ctx.fillRect(centro - 9, c.y + 9, 18, 8);
+        // las cintas del antifaz
+        ctx.beginPath();
+        ctx.moveTo(centro + 9, c.y + 11);
+        ctx.lineTo(centro + 14, c.y + 8);
+        ctx.lineTo(centro + 13, c.y + 14);
+        ctx.fill();
+      }
+
+      // Ojos
+      ctx.fillStyle = malvado ? "#ffeb3b" : "white";
+      ctx.beginPath();
+      ctx.arc(centro - 4, c.y + 13, 3, 0, Math.PI * 2);
+      ctx.arc(centro + 4, c.y + 13, 3, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = malvado ? "#b71c1c" : "black";
+      ctx.beginPath();
+      ctx.arc(centro - 4 + mx, c.y + 13 + my, 1.5, 0, Math.PI * 2);
+      ctx.arc(centro + 4 + mx, c.y + 13 + my, 1.5, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Cejas enojadas (desde el nivel de las armas)
+      ctx.strokeStyle = "black";
+      ctx.lineWidth = 1.5;
+      if (nivel >= NIVEL_ARMAS) {
+        ctx.beginPath();
+        ctx.moveTo(centro - 8, c.y + 7);  ctx.lineTo(centro - 2, c.y + 10);
+        ctx.moveTo(centro + 8, c.y + 7);  ctx.lineTo(centro + 2, c.y + 10);
+        ctx.stroke();
+      }
+
+      // Boca
+      ctx.beginPath();
+      if (malvado) {
+        // Sonrisa malvada con dientes
+        ctx.fillStyle = "#111";
+        ctx.arc(centro, c.y + 19, 5, 0, Math.PI);
+        ctx.fill();
+        ctx.fillStyle = "white";
+        ctx.beginPath();
+        ctx.moveTo(centro - 4, c.y + 19); ctx.lineTo(centro - 2.5, c.y + 21.5); ctx.lineTo(centro - 1, c.y + 19);
+        ctx.moveTo(centro + 1, c.y + 19); ctx.lineTo(centro + 2.5, c.y + 21.5); ctx.lineTo(centro + 4, c.y + 19);
+        ctx.fill();
+      } else if (nivel >= NIVEL_ARMAS) {
+        // Boca enojada
+        ctx.arc(centro, c.y + 24, 4, 1.15 * Math.PI, 1.85 * Math.PI);
+        ctx.stroke();
+      } else {
+        // Sonrisa amigable
+        ctx.arc(centro, c.y + 17, 4, 0.15 * Math.PI, 0.85 * Math.PI);
+        ctx.stroke();
+      }
+
+      // --- ARMA (apunta al jugador) ---
+      if (c.armado) {
+        let angulo = anguloHaciaJugador(c);
+        ctx.save();
+        ctx.translate(centro, c.y + 32);
+        ctx.rotate(angulo);
+        ctx.fillStyle = "#333";
+        ctx.fillRect(8, -3, 16, 5);   // cañón
+        ctx.fillRect(8, -3, 5, 9);    // mango
+        // El cañón brilla justo antes de disparar (¡aviso para esquivar!)
+        if (c.recarga < 25) {
+          ctx.fillStyle = "orange";
+          ctx.beginPath();
+          ctx.arc(25, -0.5, 3.5, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.restore();
+      }
+    }
+
+    // 9. DIBUJAR AL JUGADOR (el personaje elegido, con su arma si tiene)
+    function dibujarJugador() {
+      let j = centroDelJugador();
+      let r = jugador.lado / 2;
+
+      // Si tiene arma, dibujarla apuntando hacia donde mira
+      if (arma > 0) {
+        let angulo = Math.atan2(direccion.y, direccion.x);
+        ctx.save();
+        ctx.translate(j.x, j.y);
+        ctx.rotate(angulo);
+        ctx.fillStyle = "#29b6f6";
+        if (armaDoble) {
+          ctx.fillRect(r - 4, -12, 16, 6);   // dos cañones
+          ctx.fillRect(r - 4, 6, 16, 6);
+        } else {
+          ctx.fillRect(r - 4, -3, 18, 6);
+        }
+        ctx.restore();
+      }
+
+      // El personaje elegido (con cara feliz o de molesto)
+      dibujarPersonaje(PERSONAJES[personajeElegido].id, j.x, j.y, 1, molesto > 0, direccion);
+    }
+
+    // Rectángulo con esquinas redondas (se usa en el robot y en los menús)
+    function rectRedondo(x, y, w, h, r) {
+      ctx.beginPath();
+      ctx.moveTo(x + r, y);
+      ctx.arcTo(x + w, y, x + w, y + h, r);
+      ctx.arcTo(x + w, y + h, x, y + h, r);
+      ctx.arcTo(x, y + h, x, y, r);
+      ctx.arcTo(x, y, x + w, y, r);
+      ctx.closePath();
+    }
+
+    // Dibuja un personaje con centro en (x, y). "escala" 1 = tamaño normal (radio 20)
+    function dibujarPersonaje(tipo, x, y, escala, estaMolesto, mira) {
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.scale(escala, escala);
+      let conBoca = true;
+
+      if (tipo === "bolita") {
+        ctx.fillStyle = "#ff6b6b";
+        ctx.beginPath();
+        ctx.arc(0, 0, 20, 0, Math.PI * 2);
+        ctx.fill();
+
+      } else if (tipo === "gatito") {
+        // Orejas
+        ctx.fillStyle = "#f4a261";
+        ctx.beginPath();
+        ctx.moveTo(-18, -7); ctx.lineTo(-12, -26); ctx.lineTo(-2, -17);
+        ctx.moveTo(18, -7);  ctx.lineTo(12, -26);  ctx.lineTo(2, -17);
+        ctx.fill();
+        ctx.fillStyle = "#ffb4c6";
+        ctx.beginPath();
+        ctx.moveTo(-14, -12); ctx.lineTo(-11, -21); ctx.lineTo(-6, -16);
+        ctx.moveTo(14, -12);  ctx.lineTo(11, -21);  ctx.lineTo(6, -16);
+        ctx.fill();
+        // Cabeza
+        ctx.fillStyle = "#f4a261";
+        ctx.beginPath();
+        ctx.arc(0, 0, 20, 0, Math.PI * 2);
+        ctx.fill();
+        // Rayitas en la frente
+        ctx.strokeStyle = "#d9793a";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(-4, -19); ctx.lineTo(-3, -13);
+        ctx.moveTo(4, -19);  ctx.lineTo(3, -13);
+        ctx.stroke();
+
+      } else if (tipo === "pollito") {
+        // Cresta
+        ctx.fillStyle = "#e63946";
+        ctx.beginPath();
+        ctx.arc(-5, -19, 4, 0, Math.PI * 2);
+        ctx.arc(0, -22, 4.5, 0, Math.PI * 2);
+        ctx.arc(5, -19, 4, 0, Math.PI * 2);
+        ctx.fill();
+        // Alitas
+        ctx.fillStyle = "#f4b400";
+        ctx.beginPath();
+        ctx.ellipse(-20, 6, 5, 9, -0.4, 0, Math.PI * 2);
+        ctx.ellipse(20, 6, 5, 9, 0.4, 0, Math.PI * 2);
+        ctx.fill();
+        // Cuerpo
+        ctx.fillStyle = "#ffd166";
+        ctx.beginPath();
+        ctx.arc(0, 0, 20, 0, Math.PI * 2);
+        ctx.fill();
+        conBoca = false;   // tiene pico en vez de boca
+
+      } else if (tipo === "robot") {
+        // Antena
+        ctx.strokeStyle = "#455a64";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(0, -19); ctx.lineTo(0, -27);
+        ctx.stroke();
+        ctx.fillStyle = "#ff1744";
+        ctx.beginPath();
+        ctx.arc(0, -28, 3.5, 0, Math.PI * 2);
+        ctx.fill();
+        // Orejas (tornillos)
+        ctx.fillStyle = "#607d8b";
+        ctx.fillRect(-23, -6, 4, 12);
+        ctx.fillRect(19, -6, 4, 12);
+        // Cabeza
+        ctx.fillStyle = "#b0bec5";
+        ctx.strokeStyle = "#455a64";
+        rectRedondo(-19, -19, 38, 38, 7);
+        ctx.fill();
+        ctx.stroke();
+        // Pantalla de la cara
+        ctx.fillStyle = "rgba(38, 50, 56, 0.35)";
+        rectRedondo(-15, -12, 30, 14, 4);
+        ctx.fill();
+
+      } else if (tipo === "fantasma") {
+        ctx.fillStyle = "rgba(245, 245, 255, 0.95)";
+        ctx.strokeStyle = "#b0bec5";
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(-20, 18);
+        ctx.lineTo(-20, 0);
+        ctx.arc(0, 0, 20, Math.PI, 0);
+        ctx.lineTo(20, 18);
+        // la parte de abajo en ondas
+        for (let i = 0; i < 4; i++) {
+          let x1 = 20 - i * 10;
+          ctx.quadraticCurveTo(x1 - 5, i % 2 === 0 ? 26 : 12, x1 - 10, 18);
+        }
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+      }
+
+      dibujarCara(estaMolesto, mira, conBoca);
+
+      // Detalles que van encima de la cara
+      if (tipo === "gatito") {
+        // Nariz y bigotes
+        ctx.fillStyle = "#e5738a";
+        ctx.beginPath();
+        ctx.moveTo(-2.5, 0); ctx.lineTo(2.5, 0); ctx.lineTo(0, 3);
+        ctx.fill();
+        ctx.strokeStyle = "#5a3825";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(-9, 3);  ctx.lineTo(-23, 0);
+        ctx.moveTo(-9, 6);  ctx.lineTo(-23, 7);
+        ctx.moveTo(9, 3);   ctx.lineTo(23, 0);
+        ctx.moveTo(9, 6);   ctx.lineTo(23, 7);
+        ctx.stroke();
+      } else if (tipo === "pollito") {
+        // Pico
+        ctx.fillStyle = "#f77f00";
+        ctx.beginPath();
+        ctx.moveTo(-5, 3); ctx.lineTo(5, 3); ctx.lineTo(0, 10);
+        ctx.fill();
+      }
+
+      ctx.restore();
+    }
+
+    // Cara del personaje (feliz o molesta), para un personaje de radio 20 en (0, 0)
+    function dibujarCara(estaMolesto, mira, conBoca) {
+      // Los ojos miran hacia donde se mueve
+      let mx = mira.x * 2;
+      let my = mira.y * 2;
+      let ojoY = estaMolesto ? -4 : -5;
+
+      // Ojos blancos con borde (para que se vean también en el fantasma)
+      ctx.fillStyle = "white";
+      ctx.strokeStyle = "#333";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.arc(-7, ojoY, 5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(7, ojoY, 5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.fillStyle = "black";
+      ctx.strokeStyle = "black";
+      if (estaMolesto) {
+        // --- CARA DE MOLESTO ---
+        ctx.beginPath();
+        ctx.arc(-7, -3, 2.5, 0, Math.PI * 2);
+        ctx.arc(7, -3, 2.5, 0, Math.PI * 2);
+        ctx.fill();
+        // Cejas enojadas
+        ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        ctx.moveTo(-13, -13); ctx.lineTo(-3, -9);
+        ctx.moveTo(13, -13);  ctx.lineTo(3, -9);
+        ctx.stroke();
+        // Boca en zigzag
+        if (conBoca) {
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.moveTo(-7, 10);
+          ctx.lineTo(-3.5, 7);
+          ctx.lineTo(0, 10);
+          ctx.lineTo(3.5, 7);
+          ctx.lineTo(7, 10);
+          ctx.stroke();
+        }
+        // Marca de enojo
+        ctx.font = "16px Arial";
+        ctx.textAlign = "center";
+        ctx.fillText("💢", 18, -16);
+        ctx.textAlign = "left";
+      } else {
+        // --- CARA FELIZ ---
+        ctx.beginPath();
+        ctx.arc(-7 + mx, -5 + my, 2.5, 0, Math.PI * 2);
+        ctx.arc(7 + mx, -5 + my, 2.5, 0, Math.PI * 2);
+        ctx.fill();
+        // Cachetes
+        ctx.fillStyle = "rgba(255, 120, 150, 0.45)";
+        ctx.beginPath();
+        ctx.arc(-12, 5, 3, 0, Math.PI * 2);
+        ctx.arc(12, 5, 3, 0, Math.PI * 2);
+        ctx.fill();
+        // Sonrisa
+        if (conBoca) {
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.arc(0, 3, 7, 0.15 * Math.PI, 0.85 * Math.PI);
+          ctx.stroke();
+        }
+      }
+    }
+
+    function dibujarBurbuja(burbuja) {
+      // Parpadea cuando está por desaparecer
+      if (burbuja.vida < 120 && Math.floor(burbuja.vida / 8) % 2 === 0) return;
+
+      let y = burbuja.y + Math.sin(burbuja.onda) * 6;
+
+      // Cada poder tiene su color: escudo azul, arma verde, arma doble naranja
+      let colores = {
+        escudo: ["rgba(120, 200, 255, 0.35)", "rgba(200, 240, 255, 0.9)"],
+        arma:   ["rgba(120, 255, 150, 0.35)", "rgba(200, 255, 210, 0.9)"],
+        doble:  ["rgba(255, 170, 60, 0.4)",   "rgba(255, 220, 160, 0.9)"]
+      };
+      ctx.fillStyle = colores[burbuja.tipo][0];
+      ctx.strokeStyle = colores[burbuja.tipo][1];
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(burbuja.x, y, burbuja.radio, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      // brillito
+      ctx.fillStyle = "rgba(255, 255, 255, 0.8)";
+      ctx.beginPath();
+      ctx.arc(burbuja.x - 7, y - 8, 4, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.textAlign = "center";
+      ctx.font = "16px Arial";
+      if (burbuja.tipo === "escudo") {
+        ctx.fillText("🛡️", burbuja.x, y + 6);
+      } else {
+        ctx.fillText("🔫", burbuja.x, y + 6);
+        if (burbuja.tipo === "doble") {
+          ctx.fillStyle = "white";
+          ctx.font = "bold 13px Arial";
+          ctx.fillText("x2", burbuja.x + 12, y + 18);
+        }
+      }
+      ctx.textAlign = "left";
+    }
+
+    // Pantalla oscura con títulos en el centro
+    function dibujarMensaje(titulo, lineas) {
+      let medioX = canvas.width / 2;
+      let medioY = canvas.height / 2;
+
+      ctx.fillStyle = "rgba(0, 0, 0, 0.7)";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = "white";
+      ctx.textAlign = "center";
+      ctx.font = "bold 48px Arial";
+      ctx.fillText(titulo, medioX, medioY - 40);
+      ctx.font = "24px Arial";
+      for (let i = 0; i < lineas.length; i++) {
+        ctx.fillText(lineas[i], medioX, medioY + 10 + i * 36);
+      }
+      ctx.textAlign = "left";
+    }
+
+    // Texto blanco con borde oscuro (se lee sobre cualquier fondo)
+    function texto(t, x, y) {
+      ctx.lineWidth = 4;
+      ctx.lineJoin = "round";
+      ctx.strokeStyle = "rgba(0, 0, 0, 0.75)";
+      ctx.strokeText(t, x, y);
+      ctx.fillStyle = "white";
+      ctx.fillText(t, x, y);
+    }
+
+    // Menú de pausa
+    function dibujarMenu() {
+      let medioX = canvas.width / 2;
+      let medioY = canvas.height / 2;
+
+      ctx.fillStyle = "rgba(0, 0, 0, 0.75)";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.textAlign = "center";
+      ctx.fillStyle = "white";
+      ctx.font = "bold 48px Arial";
+      ctx.fillText("⏸ MENÚ", medioX, medioY - 120);
+
+      ctx.font = "28px Arial";
+      for (let i = 0; i < OPCIONES_MENU.length; i++) {
+        let y = medioY - 30 + i * 60;
+        if (i === opcionMenu) {
+          ctx.fillStyle = "rgba(255, 215, 0, 0.2)";
+          ctx.strokeStyle = "gold";
+          ctx.lineWidth = 2;
+          rectRedondo(medioX - 220, y - 36, 440, 50, 12);
+          ctx.fill();
+          ctx.stroke();
+          ctx.fillStyle = "gold";
+        } else {
+          ctx.fillStyle = "white";
+        }
+        ctx.fillText(OPCIONES_MENU[i], medioX, y);
+      }
+
+      ctx.fillStyle = "#bbb";
+      ctx.font = "18px Arial";
+      ctx.fillText("↑ ↓ para moverte   ·   Enter para elegir   ·   Backspace para volver al juego", medioX, medioY + 170);
+      ctx.textAlign = "left";
+    }
+
+    // Pantalla para elegir personaje
+    function dibujarElegirPersonaje() {
+      let medioX = canvas.width / 2;
+      let medioY = canvas.height / 2;
+      let espacio = Math.min(160, (canvas.width - 60) / PERSONAJES.length);
+      let inicioX = medioX - espacio * (PERSONAJES.length - 1) / 2;
+
+      ctx.fillStyle = "rgba(0, 0, 0, 0.8)";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.textAlign = "center";
+      ctx.fillStyle = "white";
+      ctx.font = "bold 44px Arial";
+      ctx.fillText("🎭 Elige tu personaje", medioX, medioY - 140);
+
+      for (let i = 0; i < PERSONAJES.length; i++) {
+        let x = inicioX + i * espacio;
+
+        // Marco dorado alrededor del que está marcado
+        if (i === cursorPersonaje) {
+          ctx.fillStyle = "rgba(255, 215, 0, 0.18)";
+          ctx.strokeStyle = "gold";
+          ctx.lineWidth = 3;
+          rectRedondo(x - espacio / 2 + 8, medioY - 75, espacio - 16, 175, 14);
+          ctx.fill();
+          ctx.stroke();
+        }
+
+        dibujarPersonaje(PERSONAJES[i].id, x, medioY, 2, false, { x: 0, y: 0 });
+
+        ctx.textAlign = "center";
+        ctx.font = "20px Arial";
+        ctx.fillStyle = i === cursorPersonaje ? "gold" : "white";
+        ctx.fillText(PERSONAJES[i].nombre, x, medioY + 72);
+        if (i === personajeElegido) {
+          ctx.font = "15px Arial";
+          ctx.fillStyle = "#9f9";
+          ctx.fillText("(actual)", x, medioY + 92);
+        }
+      }
+
+      ctx.fillStyle = "#bbb";
+      ctx.font = "18px Arial";
+      ctx.fillText("← → para elegir   ·   Enter para confirmar   ·   Backspace para volver", medioX, medioY + 150);
+      ctx.textAlign = "left";
+    }
+
+    // 10. DIBUJAR TODO
+    function dibujar() {
+      // El escenario del nivel (ya dibujado en el lienzo "fondo")
+      ctx.drawImage(fondo, 0, 0);
+
+      // Borde (es una pared)
+      ctx.strokeStyle = "red";
+      ctx.lineWidth = 6;
+      ctx.strokeRect(3, 3, canvas.width - 6, canvas.height - 6);
+
+      // Cactus
+      for (let c of cactus) {
+        dibujarCactus(c);
+      }
+
+      // Explosiones (círculos que crecen y se desvanecen)
+      for (let e of explosiones) {
+        let transparencia = 1 - e.cuadro / 25;
+        ctx.fillStyle = "rgba(255, 160, 0, " + transparencia + ")";
+        ctx.beginPath();
+        ctx.arc(e.x, e.y, 10 + e.cuadro * 1.5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = "rgba(255, 255, 150, " + transparencia + ")";
+        ctx.beginPath();
+        ctx.arc(e.x, e.y, 5 + e.cuadro * 0.8, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // Balas de los cactus
+      // (con borde oscuro para que se vean en cualquier fondo)
+      ctx.fillStyle = nivel >= NIVEL_MALVADOS ? "#ff5252" : "#ffd54f";
+      ctx.strokeStyle = "#222";
+      ctx.lineWidth = 1.5;
+      for (let b of balas) {
+        ctx.beginPath();
+        ctx.arc(b.x, b.y, b.radio, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      }
+
+      // Balas del jugador
+      ctx.fillStyle = "#4fc3f7";
+      ctx.strokeStyle = "#01579b";
+      for (let b of misBalas) {
+        ctx.beginPath();
+        ctx.arc(b.x, b.y, b.radio, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      }
+
+      if (estado !== "inicio") {
+        // Burbuja de poder
+        for (let bu of burbujas) dibujarBurbuja(bu);
+
+        // Moneda
+        ctx.fillStyle = "gold";
+        ctx.strokeStyle = "#8a6d00";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(moneda.x, moneda.y, moneda.radio, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+
+        // Jugador (parpadea si es invencible)
+        if (Math.floor(invencible / 6) % 2 === 0) {
+          dibujarJugador();
+        }
+
+        // Escudo alrededor del jugador (parpadea los últimos 2 segundos)
+        if (escudo > 0 && (escudo > 120 || Math.floor(escudo / 8) % 2 === 0)) {
+          let j = centroDelJugador();
+          ctx.fillStyle = "rgba(100, 200, 255, 0.25)";
+          ctx.strokeStyle = "#7fdbff";
+          ctx.lineWidth = 3;
+          ctx.beginPath();
+          ctx.arc(j.x, j.y, 34, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.stroke();
+        }
+
+        // Marcador de arriba (con borde oscuro para que se lea en cualquier fondo)
+        ctx.font = "22px Arial";
+        ctx.textAlign = "left";
+        texto("Nivel: " + nivel + " / " + NIVEL_FINAL, 20, 36);
+        ctx.textAlign = "center";
+        texto("💰 " + monedasNivel + " / " + MONEDAS_POR_NIVEL + "     Puntos: " + puntos, canvas.width / 2, 36);
+        ctx.textAlign = "right";
+        let textoVidas;
+        if (vidasDelNivel() > 3) {
+          textoVidas = "❤️ x " + vidas;   // 10 corazones no caben
+        } else {
+          textoVidas = "❤️".repeat(vidas) + "🖤".repeat(vidasDelNivel() - vidas);
+        }
+        texto("Vidas: " + textoVidas, canvas.width - 20, 36);
+        let fila = 68;
+        if (escudo > 0) {
+          texto("🛡️ Escudo: " + Math.ceil(escudo / 60) + "s", canvas.width - 20, fila);
+          fila += 32;
+        }
+        if (arma > 0) {
+          texto("🔫" + (armaDoble ? " x2" : "") + " Arma: " + Math.ceil(arma / 60) + "s  (barra baja _ )", canvas.width - 20, fila);
+        }
+        ctx.textAlign = "left";
+      }
+
+      // Pantallas especiales
+      if (estado === "inicio") {
+        dibujarMensaje("💰 Atrapa Monedas 🌵", [
+          "Muévete con las flechas del teclado.",
+          "Atrapa " + MONEDAS_POR_NIVEL + " monedas para pasar de nivel. ¡Hay " + NIVEL_FINAL + " niveles!",
+          "No toques los cactus: tienes 3 vidas por nivel (10 vidas desde el nivel " + NIVEL_MALVADOS + ").",
+          "Agarra las burbujas: escudo 🛡️ (10 s) o arma 🔫 (20 s, desde el nivel " + NIVEL_ARMAS + ").",
+          "Con el arma, dispara con la barra baja ( _ ).  Menú de pausa: Backspace ⌫",
+          "← → para elegir personaje:  " + PERSONAJES[personajeElegido].nombre,
+          "Presiona Enter para empezar"
+        ]);
+        // Mostrar el personaje elegido arriba del título
+        dibujarPersonaje(PERSONAJES[personajeElegido].id, canvas.width / 2, canvas.height / 2 - 140, 2, false, { x: 0, y: 0 });
+      } else if (estado === "menu") {
+        dibujarMenu();
+      } else if (estado === "personajes") {
+        dibujarElegirPersonaje();
+      } else if (estado === "aviso") {
+        let lineas = [
+          "📍 " + ESCENARIOS[nivel - 1].nombre,
+          "Atrapa " + MONEDAS_POR_NIVEL + " monedas",
+          cantidadDeCactus() + " cactus en movimiento"
+        ];
+        if (nivel === NIVEL_ARMAS) {
+          lineas.push("¡Cuidado! Ahora los cactus tienen armas 🔫");
+          lineas.push("Busca las burbujas con arma: verde 🔫 y naranja 🔫 x2 (dispara 2 bolitas)");
+        } else if (nivel > NIVEL_ARMAS) {
+          lineas.push(cantidadDeArmados() + " cactus con armas 🔫");
+        }
+        if (nivel === NIVEL_MALVADOS) lineas.push("😈 ¡Llegaron los cactus rojos malvados! 😈");
+        if (nivel >= NIVEL_MALVADOS) lineas.push("Tienes 10 vidas ❤️");
+        dibujarMensaje("¡Nivel " + nivel + "!", lineas);
+      } else if (estado === "perdido") {
+        dibujarMensaje("¡Te quedaste sin vidas!", [
+          "Llegaste al nivel " + nivel + " y atrapaste " + puntos + " monedas",
+          "Presiona Enter para volver al nivel 1"
+        ]);
+      } else if (estado === "ganado") {
+        dibujarMensaje("🏆 ¡GANASTE! 🏆", [
+          "Completaste los " + NIVEL_FINAL + " niveles y atrapaste " + puntos + " monedas",
+          "Presiona Enter para jugar otra vez"
+        ]);
+      }
+    }
+
+    // 11. ESCENARIOS DE FONDO (uno distinto en cada nivel)
+    // Cada función dibuja una parte del paisaje en "g" (el lienzo del fondo) de tamaño W x H.
+
+    function azar(a, b) {
+      return a + Math.random() * (b - a);
+    }
+
+    function cielo(g, W, H, arriba, abajo) {
+      let degradado = g.createLinearGradient(0, 0, 0, H);
+      degradado.addColorStop(0, arriba);
+      degradado.addColorStop(1, abajo);
+      g.fillStyle = degradado;
+      g.fillRect(0, 0, W, H);
+    }
+
+    function sol(g, x, y, r, color) {
+      let brillo = g.createRadialGradient(x, y, r * 0.5, x, y, r * 2.2);
+      brillo.addColorStop(0, color);
+      brillo.addColorStop(1, "rgba(255, 255, 255, 0)");
+      g.fillStyle = brillo;
+      g.beginPath();
+      g.arc(x, y, r * 2.2, 0, Math.PI * 2);
+      g.fill();
+      g.fillStyle = color;
+      g.beginPath();
+      g.arc(x, y, r, 0, Math.PI * 2);
+      g.fill();
+    }
+
+    // Luna llena (con cráteres) o luna creciente (tapando un pedazo con el color del cielo)
+    function luna(g, x, y, r, color, llena, colorCielo) {
+      let brillo = g.createRadialGradient(x, y, r, x, y, r * 2.5);
+      brillo.addColorStop(0, "rgba(255, 255, 255, 0.25)");
+      brillo.addColorStop(1, "rgba(255, 255, 255, 0)");
+      g.fillStyle = brillo;
+      g.beginPath();
+      g.arc(x, y, r * 2.5, 0, Math.PI * 2);
+      g.fill();
+      g.fillStyle = color;
+      g.beginPath();
+      g.arc(x, y, r, 0, Math.PI * 2);
+      g.fill();
+      if (llena) {
+        g.fillStyle = "rgba(0, 0, 0, 0.08)";
+        g.beginPath();
+        g.arc(x - r * 0.3, y - r * 0.2, r * 0.22, 0, Math.PI * 2);
+        g.arc(x + r * 0.35, y + r * 0.25, r * 0.15, 0, Math.PI * 2);
+        g.arc(x - r * 0.1, y + r * 0.45, r * 0.12, 0, Math.PI * 2);
+        g.fill();
+      } else {
+        g.fillStyle = colorCielo;
+        g.beginPath();
+        g.arc(x + r * 0.45, y - r * 0.2, r * 0.9, 0, Math.PI * 2);
+        g.fill();
+      }
+    }
+
+    function estrellas(g, W, H, cantidad, hasta) {
+      for (let i = 0; i < cantidad; i++) {
+        let s = azar(1, 2.5);
+        g.fillStyle = "rgba(255, 255, 255, " + azar(0.4, 1) + ")";
+        g.fillRect(azar(0, W), azar(0, H * hasta), s, s);
+      }
+    }
+
+    function nubes(g, W, H, cantidad) {
+      g.fillStyle = "rgba(255, 255, 255, 0.85)";
+      for (let i = 0; i < cantidad; i++) {
+        let x = azar(0, W), y = azar(H * 0.08, H * 0.35), s = azar(20, 40);
+        g.beginPath();
+        g.arc(x, y, s, 0, Math.PI * 2);
+        g.arc(x + s, y - s * 0.4, s * 1.1, 0, Math.PI * 2);
+        g.arc(x + s * 2, y, s * 0.9, 0, Math.PI * 2);
+        g.arc(x + s, y + s * 0.2, s, 0, Math.PI * 2);
+        g.fill();
+      }
+    }
+
+    // Colinas o dunas onduladas. "base" es la altura (0 = arriba, 1 = abajo)
+    function colinas(g, W, H, color, base, altura, ondas) {
+      let fase = azar(0, Math.PI * 2);
+      g.fillStyle = color;
+      g.beginPath();
+      g.moveTo(0, H);
+      for (let x = 0; x <= W + 10; x += 10) {
+        g.lineTo(x, H * base + Math.sin(x / W * ondas * Math.PI * 2 + fase) * altura);
+      }
+      g.lineTo(W, H);
+      g.closePath();
+      g.fill();
+    }
+
+    function montanas(g, W, H, color, base, alto, cantidad, nieve) {
+      let suelo = H * base;
+      for (let i = 0; i < cantidad; i++) {
+        let px = (i + 0.5) * W / cantidad + azar(-30, 30);
+        let ancho = W / cantidad * azar(1.4, 2);
+        let py = suelo - H * alto * azar(0.6, 1);
+        g.fillStyle = color;
+        g.beginPath();
+        g.moveTo(px - ancho / 2, suelo);
+        g.lineTo(px, py);
+        g.lineTo(px + ancho / 2, suelo);
+        g.fill();
+        if (nieve) {
+          let k = 0.28;
+          g.fillStyle = "#f5f6fa";
+          g.beginPath();
+          g.moveTo(px, py);
+          g.lineTo(px - ancho / 2 * k, py + (suelo - py) * k);
+          g.lineTo(px + ancho / 2 * k, py + (suelo - py) * k);
+          g.fill();
+        }
+      }
+      g.fillStyle = color;
+      g.fillRect(0, suelo, W, H - suelo);
+    }
+
+    function pinos(g, W, H, color, base, cantidad, alto) {
+      g.fillStyle = color;
+      for (let i = 0; i < cantidad; i++) {
+        let x = azar(0, W), h = alto * azar(0.7, 1.2), y = H * base + azar(-10, 10);
+        g.beginPath();
+        g.moveTo(x - h * 0.35, y - h * 0.3); g.lineTo(x, y - h); g.lineTo(x + h * 0.35, y - h * 0.3);
+        g.moveTo(x - h * 0.45, y);           g.lineTo(x, y - h * 0.65); g.lineTo(x + h * 0.45, y);
+        g.fill();
+        g.fillRect(x - h * 0.05, y, h * 0.1, h * 0.12);
+      }
+    }
+
+    function flores(g, W, H, desde, cantidad) {
+      let colores = ["#ff6b6b", "#ffd93d", "#ffffff", "#c77dff", "#ff9f1c"];
+      for (let i = 0; i < cantidad; i++) {
+        let x = azar(0, W), y = azar(H * desde, H);
+        g.fillStyle = colores[Math.floor(Math.random() * colores.length)];
+        g.beginPath();
+        g.arc(x, y, 3.5, 0, Math.PI * 2);
+        g.fill();
+        g.fillStyle = "#ffd93d";
+        g.beginPath();
+        g.arc(x, y, 1.3, 0, Math.PI * 2);
+        g.fill();
+      }
+    }
+
+    function mar(g, W, H, arriba, abajo) {
+      g.fillStyle = "#0288d1";
+      g.fillRect(0, H * arriba, W, H * (abajo - arriba));
+      // olitas
+      g.strokeStyle = "rgba(255, 255, 255, 0.5)";
+      g.lineWidth = 2;
+      for (let y = H * arriba + 15; y < H * abajo; y += 25) {
+        for (let i = 0; i < 12; i++) {
+          let x = azar(0, W);
+          g.beginPath();
+          g.moveTo(x, y);
+          g.quadraticCurveTo(x + 10, y - 5, x + 20, y);
+          g.stroke();
+        }
+      }
+      g.fillStyle = "#f4d58d";
+      g.fillRect(0, H * abajo, W, H);
+    }
+
+    // Montañas planas del cañón
+    function mesas(g, W, H, color, base) {
+      let suelo = H * base;
+      g.fillStyle = color;
+      let x = azar(-100, 0);
+      while (x < W) {
+        let w = azar(120, 260), h = azar(H * 0.12, H * 0.3);
+        g.beginPath();
+        g.moveTo(x, suelo);
+        g.lineTo(x + w * 0.12, suelo - h);
+        g.lineTo(x + w * 0.88, suelo - h);
+        g.lineTo(x + w, suelo);
+        g.fill();
+        x += w + azar(20, 120);
+      }
+      g.fillRect(0, suelo, W, H - suelo);
+    }
+
+    function casasOeste(g, W, H, color, base) {
+      let suelo = H * base;
+      g.fillStyle = "#a0522d";
+      g.fillRect(0, suelo, W, H - suelo);
+      let x = 20;
+      while (x < W) {
+        let w = azar(90, 150), h = azar(70, 120);
+        g.fillStyle = color;
+        g.fillRect(x, suelo - h, w, h);
+        g.fillRect(x + w * 0.1, suelo - h - 25, w * 0.8, 25);   // fachada alta
+        g.fillStyle = "rgba(255, 200, 100, 0.6)";
+        g.fillRect(x + w * 0.2, suelo - h * 0.7, w * 0.2, h * 0.25);
+        g.fillRect(x + w * 0.6, suelo - h * 0.7, w * 0.2, h * 0.25);
+        g.fillStyle = "#2b1a0a";
+        g.fillRect(x + w * 0.4, suelo - h * 0.4, w * 0.2, h * 0.4);
+        x += w + azar(30, 90);
+      }
+    }
+
+    function ciudad(g, W, H, base) {
+      let suelo = H * base;
+      let x = 0;
+      while (x < W) {
+        let w = azar(50, 110), h = azar(H * 0.15, H * 0.45);
+        g.fillStyle = "#0b1320";
+        g.fillRect(x, suelo - h, w, H - suelo + h);
+        for (let wy = suelo - h + 10; wy < suelo - 5; wy += 18) {
+          for (let wx = x + 8; wx < x + w - 10; wx += 16) {
+            if (Math.random() < 0.35) {
+              g.fillStyle = "rgba(255, 220, 120, 0.8)";
+              g.fillRect(wx, wy, 7, 9);
+            }
+          }
+        }
+        x += w + azar(2, 10);
+      }
+      g.fillStyle = "#0b1320";
+      g.fillRect(0, suelo, W, H - suelo);
+    }
+
+    function ladrillos(g, W, H, color, linea) {
+      g.fillStyle = color;
+      g.fillRect(0, 0, W, H);
+      let alto = 32, ancho = 64;
+      for (let fila = 0; fila * alto < H; fila++) {
+        let y = fila * alto;
+        let corrido = (fila % 2) * ancho / 2;
+        for (let x = -corrido; x < W; x += ancho) {
+          // algunos ladrillos un poco más oscuros
+          g.fillStyle = "rgba(0, 0, 0, " + azar(0, 0.15) + ")";
+          g.fillRect(x, y, ancho, alto);
+          g.strokeStyle = linea;
+          g.lineWidth = 2;
+          g.strokeRect(x, y, ancho, alto);
+        }
+      }
+    }
+
+    function ventanaConBarrotes(g, x, y, w, h) {
+      g.fillStyle = "#0d1b2a";
+      g.fillRect(x, y, w, h);
+      g.fillStyle = "#fdf6e3";
+      g.beginPath();
+      g.arc(x + w * 0.7, y + h * 0.35, Math.min(w, h) * 0.15, 0, Math.PI * 2);
+      g.fill();
+      g.fillStyle = "#222";
+      for (let i = 1; i < 5; i++) {
+        g.fillRect(x + i * w / 5 - 3, y, 6, h);
+      }
+      g.strokeStyle = "#222";
+      g.lineWidth = 8;
+      g.strokeRect(x, y, w, h);
+    }
+
+    function lampara(g, x, y) {
+      g.strokeStyle = "#222";
+      g.lineWidth = 2;
+      g.beginPath();
+      g.moveTo(x, 0);
+      g.lineTo(x, y);
+      g.stroke();
+      let luz = g.createRadialGradient(x, y + 10, 5, x, y + 10, 180);
+      luz.addColorStop(0, "rgba(255, 230, 150, 0.45)");
+      luz.addColorStop(1, "rgba(255, 230, 150, 0)");
+      g.fillStyle = luz;
+      g.beginPath();
+      g.arc(x, y + 10, 180, 0, Math.PI * 2);
+      g.fill();
+      g.fillStyle = "#333";
+      g.beginPath();
+      g.moveTo(x - 20, y + 12); g.lineTo(x, y); g.lineTo(x + 20, y + 12);
+      g.fill();
+      g.fillStyle = "#ffe082";
+      g.beginPath();
+      g.arc(x, y + 14, 6, 0, Math.PI * 2);
+      g.fill();
+    }
+
+    // Barrotes grandes semi transparentes (para no tapar el juego)
+    function barrotes(g, W, H) {
+      g.fillStyle = "rgba(20, 20, 20, 0.35)";
+      for (let x = 40; x < W; x += 140) {
+        g.fillRect(x, 0, 12, H);
+      }
+      g.fillRect(0, H * 0.12, W, 12);
+      g.fillRect(0, H * 0.9, W, 12);
+    }
+
+    function estalactitas(g, W, H, color) {
+      g.fillStyle = color;
+      g.fillRect(0, 0, W, 15);
+      let x = 0;
+      while (x < W) {
+        let w = azar(20, 60), h = azar(30, H * 0.2);
+        g.beginPath();
+        g.moveTo(x, 10); g.lineTo(x + w / 2, h); g.lineTo(x + w, 10);
+        g.fill();
+        x += w * azar(0.6, 1.2);
+      }
+      // estalagmitas (desde el piso)
+      x = 0;
+      while (x < W) {
+        let w = azar(30, 70), h = azar(20, H * 0.12);
+        g.beginPath();
+        g.moveTo(x, H); g.lineTo(x + w / 2, H - h); g.lineTo(x + w, H);
+        g.fill();
+        x += w * azar(0.8, 1.6);
+      }
+    }
+
+    function antorcha(g, x, y) {
+      let luz = g.createRadialGradient(x, y - 15, 5, x, y - 15, 130);
+      luz.addColorStop(0, "rgba(255, 160, 50, 0.45)");
+      luz.addColorStop(1, "rgba(255, 160, 50, 0)");
+      g.fillStyle = luz;
+      g.beginPath();
+      g.arc(x, y - 15, 130, 0, Math.PI * 2);
+      g.fill();
+      g.fillStyle = "#5d4037";
+      g.fillRect(x - 3, y - 5, 6, 30);
+      g.fillStyle = "#ff9800";
+      g.beginPath();
+      g.moveTo(x, y - 32);
+      g.quadraticCurveTo(x + 11, y - 12, x, y - 4);
+      g.quadraticCurveTo(x - 11, y - 12, x, y - 32);
+      g.fill();
+      g.fillStyle = "#ffeb3b";
+      g.beginPath();
+      g.moveTo(x, y - 22);
+      g.quadraticCurveTo(x + 5, y - 10, x, y - 6);
+      g.quadraticCurveTo(x - 5, y - 10, x, y - 22);
+      g.fill();
+    }
+
+    function arbolSeco(g, x, suelo, alto, color) {
+      g.strokeStyle = color;
+      g.lineCap = "round";
+      g.lineWidth = alto * 0.07;
+      g.beginPath();
+      g.moveTo(x, suelo); g.lineTo(x, suelo - alto);
+      g.stroke();
+      g.lineWidth = alto * 0.03;
+      g.beginPath();
+      g.moveTo(x, suelo - alto * 0.55); g.lineTo(x - alto * 0.3, suelo - alto * 0.85);
+      g.moveTo(x, suelo - alto * 0.7);  g.lineTo(x + alto * 0.3, suelo - alto * 0.95);
+      g.moveTo(x, suelo - alto * 0.9);  g.lineTo(x - alto * 0.15, suelo - alto * 1.08);
+      g.moveTo(x + alto * 0.15, suelo - alto * 0.82); g.lineTo(x + alto * 0.22, suelo - alto * 0.68);
+      g.stroke();
+      g.lineCap = "butt";
+    }
+
+    function lapidas(g, W, H, base, color, cantidad) {
+      let suelo = H * base;
+      for (let i = 0; i < cantidad; i++) {
+        let x = azar(20, W - 40), w = azar(26, 40), h = w * 1.3, y = suelo + azar(0, H * 0.1);
+        g.fillStyle = color;
+        g.fillRect(x, y - h + w / 2, w, h - w / 2);
+        g.beginPath();
+        g.arc(x + w / 2, y - h + w / 2, w / 2, Math.PI, 0);
+        g.fill();
+        g.fillStyle = "rgba(0, 0, 0, 0.35)";
+        g.fillRect(x + w / 2 - 2, y - h * 0.8, 4, h * 0.4);
+        g.fillRect(x + w / 2 - 8, y - h * 0.7, 16, 4);
+      }
+    }
+
+    function niebla(g, W, H, y, alfa) {
+      for (let i = 0; i < 14; i++) {
+        g.fillStyle = "rgba(200, 220, 210, " + alfa + ")";
+        g.beginPath();
+        g.ellipse(azar(0, W), y + azar(-30, 30), azar(80, 200), azar(15, 35), 0, 0, Math.PI * 2);
+        g.fill();
+      }
+    }
+
+    function puntitos(g, W, H, cantidad, color, rMax) {
+      g.fillStyle = color;
+      for (let i = 0; i < cantidad; i++) {
+        g.beginPath();
+        g.arc(azar(0, W), azar(0, H), azar(1, rMax), 0, Math.PI * 2);
+        g.fill();
+      }
+    }
+
+    function volcan(g, W, H) {
+      let suelo = H * 0.85, cx = W * 0.5, cima = H * 0.35;
+      // humo
+      g.fillStyle = "rgba(60, 60, 60, 0.5)";
+      for (let i = 0; i < 6; i++) {
+        g.beginPath();
+        g.arc(cx + azar(-60, 60), cima - 30 - i * 25, azar(25, 45), 0, Math.PI * 2);
+        g.fill();
+      }
+      // montaña
+      g.fillStyle = "#2b0f0a";
+      g.beginPath();
+      g.moveTo(cx - W * 0.35, suelo);
+      g.lineTo(cx - W * 0.06, cima);
+      g.lineTo(cx + W * 0.06, cima);
+      g.lineTo(cx + W * 0.35, suelo);
+      g.fill();
+      // brillo de la lava en el cráter
+      let luz = g.createRadialGradient(cx, cima, 5, cx, cima, 120);
+      luz.addColorStop(0, "rgba(255, 120, 0, 0.8)");
+      luz.addColorStop(1, "rgba(255, 60, 0, 0)");
+      g.fillStyle = luz;
+      g.beginPath();
+      g.arc(cx, cima, 120, 0, Math.PI * 2);
+      g.fill();
+      // ríos de lava
+      g.strokeStyle = "#ff5722";
+      g.lineWidth = 6;
+      g.lineCap = "round";
+      for (let lado of [-1, 1]) {
+        g.beginPath();
+        g.moveTo(cx + lado * W * 0.03, cima + 5);
+        let x = cx + lado * W * 0.03;
+        for (let y = cima + 40; y < suelo; y += 40) {
+          x += lado * azar(5, 30);
+          g.lineTo(x, y);
+        }
+        g.stroke();
+      }
+      g.lineCap = "butt";
+      g.fillStyle = "#1a0806";
+      g.fillRect(0, suelo, W, H - suelo);
+    }
+
+    function castillo(g, W, H, base, color) {
+      let suelo = H * base, cx = W * 0.5, altoMuro = H * 0.18;
+      g.fillStyle = color;
+      g.fillRect(cx - W * 0.25, suelo - altoMuro, W * 0.5, altoMuro);
+      for (let x = cx - W * 0.25; x < cx + W * 0.25; x += 20) {
+        g.fillRect(x, suelo - altoMuro - 10, 10, 10);   // almenas
+      }
+      let torres = [[-0.25, 0.3], [-0.08, 0.42], [0.08, 0.42], [0.25, 0.3]];
+      for (let t of torres) {
+        let tx = cx + t[0] * W, tw = W * 0.05, th = H * t[1];
+        g.fillStyle = color;
+        g.fillRect(tx - tw / 2, suelo - th, tw, th);
+        g.beginPath();
+        g.moveTo(tx - tw * 0.7, suelo - th);
+        g.lineTo(tx, suelo - th - tw * 1.3);
+        g.lineTo(tx + tw * 0.7, suelo - th);
+        g.fill();
+        g.fillStyle = "rgba(255, 60, 60, 0.85)";   // ventanas rojas
+        g.fillRect(tx - 4, suelo - th + 20, 8, 14);
+        g.fillRect(tx - 4, suelo - th * 0.55, 8, 14);
+      }
+      g.fillStyle = color;
+      g.fillRect(0, suelo, W, H - suelo);
+    }
+
+    const ESCENARIOS = [
+      { nombre: "Pradera soleada", dibujar: (g, W, H) => {
+        cielo(g, W, H, "#6ec6ff", "#bfe9ff");
+        sol(g, W * 0.85, H * 0.18, 50, "#ffe066");
+        nubes(g, W, H, 5);
+        colinas(g, W, H, "#7cc576", 0.72, 30, 2);
+        colinas(g, W, H, "#4caf50", 0.84, 25, 3);
+      }},
+      { nombre: "Campo de flores", dibujar: (g, W, H) => {
+        cielo(g, W, H, "#87ceeb", "#e0f7ff");
+        sol(g, W * 0.15, H * 0.16, 45, "#fff176");
+        nubes(g, W, H, 4);
+        colinas(g, W, H, "#8bc34a", 0.74, 25, 2);
+        flores(g, W, H, 0.8, 180);
+      }},
+      { nombre: "Bosque de pinos", dibujar: (g, W, H) => {
+        cielo(g, W, H, "#9fd8ef", "#e8f5e9");
+        nubes(g, W, H, 3);
+        colinas(g, W, H, "#5a8f5a", 0.7, 20, 2);
+        pinos(g, W, H, "#2e5e3e", 0.75, 22, 90);
+        colinas(g, W, H, "#3d7a3d", 0.9, 10, 3);
+        pinos(g, W, H, "#1b4332", 0.95, 12, 140);
+      }},
+      { nombre: "La playa", dibujar: (g, W, H) => {
+        cielo(g, W, H, "#4fc3f7", "#b3e5fc");
+        sol(g, W * 0.75, H * 0.2, 50, "#ffee58");
+        nubes(g, W, H, 3);
+        mar(g, W, H, 0.55, 0.8);
+      }},
+      { nombre: "El desierto", dibujar: (g, W, H) => {
+        cielo(g, W, H, "#ffe0a3", "#fff3d6");
+        sol(g, W * 0.5, H * 0.15, 55, "#fffde7");
+        colinas(g, W, H, "#e9c46a", 0.7, 25, 1.5);
+        colinas(g, W, H, "#d4a373", 0.83, 20, 2.5);
+      }},
+      { nombre: "Atardecer en el desierto", dibujar: (g, W, H) => {
+        cielo(g, W, H, "#ff7e5f", "#feb47b");
+        sol(g, W * 0.5, H * 0.66, 90, "#ffcc70");
+        colinas(g, W, H, "#b5651d", 0.7, 25, 1.5);
+        colinas(g, W, H, "#8b4513", 0.84, 20, 2.5);
+      }},
+      { nombre: "El cañón rojo", dibujar: (g, W, H) => {
+        cielo(g, W, H, "#ffb347", "#ffcc99");
+        sol(g, W * 0.2, H * 0.2, 40, "#fff3c4");
+        mesas(g, W, H, "#b5452b", 0.75);
+        colinas(g, W, H, "#8c3a22", 0.88, 12, 3);
+      }},
+      { nombre: "Pueblo del oeste", dibujar: (g, W, H) => {
+        cielo(g, W, H, "#f79d65", "#f4845f");
+        sol(g, W * 0.8, H * 0.55, 60, "#ffd180");
+        casasOeste(g, W, H, "#5d3a1a", 0.8);
+      }},
+      { nombre: "Las montañas", dibujar: (g, W, H) => {
+        cielo(g, W, H, "#74b9ff", "#dfe6e9");
+        nubes(g, W, H, 3);
+        montanas(g, W, H, "#636e72", 0.78, 0.4, 5, false);
+        colinas(g, W, H, "#6ab04c", 0.86, 15, 2);
+      }},
+      { nombre: "Montañas nevadas", dibujar: (g, W, H) => {
+        cielo(g, W, H, "#6c5ce7", "#fd79a8");
+        estrellas(g, W, H, 40, 0.4);
+        montanas(g, W, H, "#4b4b6b", 0.8, 0.45, 6, true);
+        colinas(g, W, H, "#2d3436", 0.9, 10, 2);
+      }},
+      { nombre: "Tormenta de nieve", dibujar: (g, W, H) => {
+        cielo(g, W, H, "#1e3c72", "#2a5298");
+        luna(g, W * 0.8, H * 0.18, 35, "#eceff1", false, "#1e3c72");
+        montanas(g, W, H, "#34495e", 0.8, 0.4, 5, true);
+        puntitos(g, W, H, 250, "rgba(255, 255, 255, 0.8)", 3);
+      }},
+      { nombre: "La cueva", dibujar: (g, W, H) => {
+        cielo(g, W, H, "#2b1d14", "#4a3426");
+        estalactitas(g, W, H, "#1a110b");
+        antorcha(g, W * 0.15, H * 0.5);
+        antorcha(g, W * 0.85, H * 0.5);
+      }},
+      { nombre: "La cárcel", dibujar: (g, W, H) => {
+        ladrillos(g, W, H, "#5b5b5b", "#3d3d3d");
+        ventanaConBarrotes(g, W * 0.5 - 90, H * 0.18, 180, 120);
+        lampara(g, W * 0.2, H * 0.15);
+        lampara(g, W * 0.8, H * 0.15);
+        barrotes(g, W, H);
+      }},
+      { nombre: "El calabozo", dibujar: (g, W, H) => {
+        ladrillos(g, W, H, "#3b2f2f", "#241c1c");
+        antorcha(g, W * 0.15, H * 0.4);
+        antorcha(g, W * 0.5, H * 0.3);
+        antorcha(g, W * 0.85, H * 0.4);
+      }},
+      { nombre: "La ciudad de noche", dibujar: (g, W, H) => {
+        cielo(g, W, H, "#0f2027", "#203a43");
+        estrellas(g, W, H, 80, 0.5);
+        luna(g, W * 0.15, H * 0.15, 30, "#fdf6e3", false, "#0f2027");
+        ciudad(g, W, H, 0.72);
+      }},
+      { nombre: "El pantano tenebroso", dibujar: (g, W, H) => {
+        cielo(g, W, H, "#1d2b1f", "#3a5a40");
+        luna(g, W * 0.7, H * 0.2, 40, "#d8f3dc", true);
+        colinas(g, W, H, "#16261a", 0.8, 10, 2);
+        for (let i = 0; i < 5; i++) arbolSeco(g, azar(0, W), H * 0.82, azar(120, 200), "#0f1a10");
+        g.fillStyle = "#1f3b2c";
+        g.fillRect(0, H * 0.87, W, H * 0.13);
+        niebla(g, W, H, H * 0.82, 0.12);
+      }},
+      { nombre: "El cementerio", dibujar: (g, W, H) => {
+        cielo(g, W, H, "#141e30", "#243b55");
+        estrellas(g, W, H, 60, 0.5);
+        luna(g, W * 0.2, H * 0.18, 35, "#f5f3ce", false, "#141e30");
+        colinas(g, W, H, "#1c2833", 0.78, 15, 1.5);
+        arbolSeco(g, W * 0.85, H * 0.8, 200, "#0b0f14");
+        lapidas(g, W, H, 0.82, "#7f8c8d", 12);
+        niebla(g, W, H, H * 0.9, 0.1);
+      }},
+      { nombre: "El volcán", dibujar: (g, W, H) => {
+        cielo(g, W, H, "#1a0000", "#7a1f00");
+        volcan(g, W, H);
+        puntitos(g, W, H, 120, "rgba(255, 140, 0, 0.6)", 2);
+      }},
+      { nombre: "Noche de luna llena", dibujar: (g, W, H) => {
+        cielo(g, W, H, "#000428", "#004e92");
+        estrellas(g, W, H, 150, 0.7);
+        luna(g, W * 0.5, H * 0.33, Math.min(W, H) * 0.16, "#fdf6e3", true);
+        colinas(g, W, H, "#001a33", 0.86, 15, 2);
+      }},
+      { nombre: "El castillo del jefe", dibujar: (g, W, H) => {
+        cielo(g, W, H, "#1a0000", "#4a0000");
+        estrellas(g, W, H, 60, 0.5);
+        luna(g, W * 0.78, H * 0.2, 50, "#ff3b3b", true);
+        castillo(g, W, H, 0.84, "#0d0d0d");
+      }}
+    ];
+
+    // Dibuja el escenario del nivel actual en el lienzo "fondo"
+    function prepararFondo() {
+      fondo.width = canvas.width;
+      fondo.height = canvas.height;
+      let g = fondo.getContext("2d");
+      ESCENARIOS[nivel - 1].dibujar(g, fondo.width, fondo.height);
+      // Oscurecer un poquito para que el juego se vea bien encima
+      g.fillStyle = "rgba(0, 0, 0, 0.18)";
+      g.fillRect(0, 0, fondo.width, fondo.height);
+    }
+
+    // 12. EL BUCLE DEL JUEGO (se repite unas 60 veces por segundo)
+    function bucle() {
+      if (estado === "jugando") {
+        actualizar();
+      } else if (estado === "aviso") {
+        avisoCuadros--;
+        if (avisoCuadros <= 0) estado = "jugando";
+      }
+      dibujar();
+      requestAnimationFrame(bucle);
+    }
+
+    // 13. ¡EMPEZAR!
+    ajustarPantalla();
+    centrarJugador();
+    bucle();
+  </script>
+</body>
+</html>
