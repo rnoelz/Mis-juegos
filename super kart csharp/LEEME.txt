@@ -1,0 +1,41 @@
+SUPER KART BROS - versión en C#
+================================
+
+CÓMO JUGAR
+  Doble clic en "Super Kart.exe".
+
+CÓMO COMPILAR (si cambias el código)
+  - Doble clic en "build.bat"  (usa el compilador de C# que ya trae Windows), o
+  - Abre "SuperKart.csproj" en Visual Studio y pulsa Iniciar (F5).
+
+CONTROLES
+  J1 (o jugando solo): W A S D manejar - ESPACIO derrapar/saltar - E usar objeto
+  J2: Flechas manejar - SHIFT derecho derrapar - ENTER usar objeto
+  Jugando solo también sirven las flechas, X para el objeto y SHIFT para derrapar.
+  ESC pausa - M música - F11 pantalla completa - I (en el título) cómo jugar
+
+MODO FÚTBOL (elige "FÚTBOL" en el menú, con izquierda/derecha)
+  Partido 4 contra 4 (3 jugadores + arquero). Tú eliges al capitán.
+  Mover: WASD o flechas
+  Con la pelota: ESPACIO tirar (mantén para más fuerza) - E/X pasar
+  Sin la pelota: ESPACIO barrida - E cambiar de jugador
+  C súper tiro cuando la barra esté llena (cada personaje tiene el suyo)
+  2 jugadores: J1 rojo (WASD, ESPACIO, E, R) contra J2 azul (flechas, SHIFT der., ENTER, L)
+  Si terminan empatados: ¡gol de oro!
+
+ARCHIVOS DEL CÓDIGO
+  Program.cs  - la ventana, el bucle del juego y el teclado
+  Data.cs     - personajes, karts, pistas, copas, objetos y canciones
+  Game.cs     - física, bots, objetos, carrera, menús y récords
+  World.cs    - construcción de pistas y dibujo 3D de la carretera
+  Art.cs      - dibujos de personajes, karts, objetos y decorados
+  Screens.cs  - HUD, menús, resultados, podio y ayuda
+  Gfx.cs      - herramientas de dibujo
+  Soccer.cs   - modo fútbol: cancha, jugadores, pelota, arqueros y bots
+  Audio.cs    - música y efectos de sonido
+  Util.cs     - utilidades (colores, números al azar)
+  Tests.cs    - modo de prueba: "Super Kart.exe --test carpeta"
+
+Los récords y trofeos se guardan en %AppData%\SuperKartBros\save.txt
+
+Juego de fans, no oficial.

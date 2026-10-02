@@ -1,0 +1,51 @@
+FÚTBOL TOONS - juego de fútbol con personajes de caricaturas (C#)
+=================================================================
+
+CÓMO JUGAR
+  Doble clic en "Futbol Toons.exe".
+
+CÓMO COMPILAR (si cambias el código)
+  - Doble clic en "build.bat"  (usa el compilador de C# que ya trae Windows), o
+  - Abre "FutbolToons.csproj" en Visual Studio y pulsa Iniciar (F5).
+
+MODOS
+  Partido Amistoso  - elige dos equipos (clubes o selecciones), 1 o 2 jugadores y el estadio
+  Premier League    - liga de 6 equipos ingleses: gana el que sume más puntos
+  Champions League  - 8 equipos de Europa: cuartos, semifinal y final
+  La Liga           - liga de 6 equipos españoles
+  Supercopa         - 4 equipos: semifinal y final
+  Mundial           - selecciones: fase de grupos, semifinal y final
+  En las eliminatorias, si hay empate se define por PENALES.
+  Los trofeos que ganes quedan guardados en la VITRINA.
+
+PERSONAJES (40)
+  Dragon Ball, Bob Esponja, Pokémon, Los Simpson, Scooby-Doo, Hora de Aventura,
+  Tom y Jerry, Looney Tunes y Mario. Cada uno tiene velocidad, tiro, técnica
+  y su propio SÚPER TIRO (Kamehameha, burbuja, impactrueno, dona gigante...).
+  Tú armas tu equipo de 5: los primeros 4 juegan y el 5º es el arquero.
+
+CONTROLES
+  Mover: WASD o flechas
+  Con la pelota: ESPACIO tirar (mantén para más fuerza) - E o X pasar
+  Sin la pelota: ESPACIO barrida - E cambiar de jugador
+  C súper tiro cuando la barra esté llena
+  2 jugadores: J1 (WASD, ESPACIO, E, R) contra J2 (flechas, SHIFT der., ENTER, L)
+  Penales: TIRAR cuando la mira apunte donde quieras / de arquero: ARRIBA o ABAJO para lanzarte
+  ESC pausa - M música - F11 pantalla completa
+
+ARCHIVOS DEL CÓDIGO
+  Program.cs   - la ventana, el bucle del juego y el teclado
+  Data.cs      - personajes, clubes, selecciones, uniformes, competiciones y música
+  Toons.cs     - caras de las caricaturas, uniformes, escudos y trofeos
+  Heads.cs     - caras de Mario y Dragon Ball
+  Match.cs     - el partido: jugadores, pelota, arqueros, bots y penales
+  MatchDraw.cs - dibujo del estadio, la cancha, los jugadores y el marcador
+  Tour.cs      - torneos: ligas, eliminatorias y Mundial
+  Game.cs      - menús, selección de equipo y personajes, trofeos guardados
+  Screens.cs   - todas las pantallas
+  Gfx.cs, Audio.cs, Util.cs - herramientas de dibujo, sonido y utilidades
+  Tests.cs     - modo de prueba: "Futbol Toons.exe --test carpeta"
+
+Los trofeos se guardan en %AppData%\FutbolToons\save.txt
+
+Juego de fans, no oficial. Los uniformes están inspirados en equipos reales.
